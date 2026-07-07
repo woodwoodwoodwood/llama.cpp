@@ -183,7 +183,7 @@ static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 b
 
 #define QK_GSQ2 128   // = GSQ group size
 #define QR_GSQ2 1     // dequant processes 1 value-pair per iqs step (like Q1_0)
-#define QI_GSQ2 (QK_GSQ2 / (4 * QR_GSQ2))  // = 32 (= number of bytes)
+#define QI_GSQ2 (QK_GSQ2 / 16)  // = 8 (number of 32-bit ints per block; qs=32 bytes)
 typedef struct {
     ggml_half d;                // per-group scale (delta)
     uint8_t   qs[QK_GSQ2 / 4];  // 32 bytes: 128 x 2-bit codes, LSB-first packed (4 codes/byte)
