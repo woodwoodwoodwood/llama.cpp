@@ -22,6 +22,29 @@ static __device__ __forceinline__ void dequantize_q1_0(const void * vx, const in
     v.y = (2*bit_1 - 1) * d;
 }
 
+// GSQ2: 2-bit uniform symmetric, codebook {-2,-1,0,1}, stored code = value+2 in {0,1,2,3}.
+// 4 codes per byte, LSB-first. iqs is a code index in [0, QK_GSQ2).
+static __device__ __forceinline__ void dequantize_gsq2(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_gsq2 * x = (const block_gsq2 *) vx;
+
+    const float d = x[ib].d;
+
+    const int code_index_0 = iqs;
+    const int code_index_1 = iqs + 1;
+
+    const int byte_index_0 = code_index_0 / 4;
+    const int bit_offset_0 = (code_index_0 % 4) * 2;
+
+    const int byte_index_1 = code_index_1 / 4;
+    const int bit_offset_1 = (code_index_1 % 4) * 2;
+
+    const int code_0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 0x3;
+    const int code_1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 0x3;
+
+    v.x = (code_0 - 2) * d;
+    v.y = (code_1 - 2) * d;
+}
+
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q4_0 * x = (const block_q4_0 *) vx;
 
