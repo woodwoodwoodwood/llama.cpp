@@ -1921,9 +1921,12 @@ private:
                                 sum_exp += std::exp(logits[j] - max_logit);
                             }
                             const float log_sum_exp = max_logit + std::log(sum_exp);
-                            // store as a probability (logit - logsumexp); converted to
-                            // logprob by oaicompat_probs_vector_to_json unless post_sampling.
-                            ptok.prob = logits[prompt_toks[i]] - log_sum_exp;
+                            // store as a PROBABILITY (exp(logit - logsumexp), in
+                            // [0,1]) to match get_token_probabilities()/populate_token_probs;
+                            // oaicompat_probs_vector_to_json applies log() to
+                            // turn it into a logprob. (Storing a logprob here would
+                            // be log()'d twice and yield null.)
+                            ptok.prob = std::exp(logits[prompt_toks[i]] - log_sum_exp);
 
                             if (n_probs > 0) {
                                 std::vector<std::pair<float, llama_token>> logits_id;
@@ -1942,7 +1945,8 @@ private:
                                 for (size_t k = 0; k < top_k; ++k) {
                                     completion_token_output::prob_info info;
                                     info.tok  = logits_id[k].second;
-                                    info.prob = logits_id[k].first;
+                                    // store probability (not logprob) for consistency
+                                    info.prob = std::exp(logits_id[k].first);
                                     info.txt  = common_token_to_piece(ctx_tgt, logits_id[k].second, true);
                                     ptok.probs.push_back(info);
                                 }
