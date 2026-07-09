@@ -1839,7 +1839,7 @@ private:
                 llama_memory_clear(llama_get_memory(ctx_tgt), true);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
-                const int n_vocab   = llama_vocab_n_tokens(ctx_server.vocab);
+                const int n_vocab   = llama_vocab_n_tokens(vocab);
                 const int num_batch = (int(n_prompt) + n_batch - 1) / n_batch;
 
                 // When the prompt spans multiple batches, accumulate all logits
