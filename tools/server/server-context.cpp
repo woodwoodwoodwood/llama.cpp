@@ -1840,28 +1840,27 @@ private:
             if (n_probs > 0 && n_prompt > 1 && slot.prompt_token_probs.empty()) {
                 slot.prompt_token_probs.reserve(n_prompt);
 
-                // Separate prefill pass: clear the KV cache and decode the
-                // prompt with output logits at every position, then read
-                // logits to compute per-token logprobs. This mirrors the
-                // approach of ggml-org/llama.cpp PR #15189. Because
-                // launch_slot_with_task and the main decode loop share one
-                // thread (server_queue::start_loop), there is no concurrent
-                // decode hazard. Clearing all KV means other slots will
-                // re-process their cached prefix on their next request (a
-                // throughput cost, not a correctness issue).
-                llama_memory_clear(llama_get_memory(ctx_tgt), true);
+                // Separate prefill pass on a throwaway sequence (a high seq_id
+                // that no slot ever uses) so we can request logits at every
+                // prompt position WITHOUT clearing the shared KV cache (which
+                // would destroy other slots' cached state under -np N and trip
+                // the `pos_min == -1` assertion in pre_decode). We clear only
+                // our throwaway seq before and after. This is single-threaded
+                // with the main decode loop (server_queue::start_loop).
+                const llama_seq_id echo_seq = 1000000;
+                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
                 const int n_vocab   = llama_vocab_n_tokens(vocab);
                 const int num_batch = (int(n_prompt) + n_batch - 1) / n_batch;
 
-                // When the prompt spans multiple batches, accumulate all logits
-                // into a single buffer so each token's logprob can be computed
-                // from the logits of the *previous* position.
+                // Always accumulate logits into a local buffer right after each
+                // decode (rather than reading them later via llama_get_logits_ith,
+                // which may be invalidated by the subsequent normal prefill). Each
+                // token's logprob is computed from the logits of the PREVIOUS
+                // position, so we keep all of them.
                 std::vector<float> all_logits;
-                if (num_batch > 1) {
-                    all_logits.reserve(n_prompt * n_vocab);
-                }
+                all_logits.reserve(n_prompt * n_vocab);
 
                 bool decode_ok = true;
                 for (int batch_idx = 0; batch_idx < num_batch; ++batch_idx) {
@@ -1870,15 +1869,13 @@ private:
 
                     llama_batch batch = llama_batch_init(batch_size, 0, 1);
                     for (int i = 0; i < batch_size; ++i) {
-                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {0}, true);
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {echo_seq}, true);
                     }
 
                     const int ret = llama_decode(ctx_tgt, batch);
                     if (ret == 0) {
-                        if (num_batch > 1) {
-                            const float * batch_logits = llama_get_logits(ctx_tgt);
-                            all_logits.insert(all_logits.end(), batch_logits, batch_logits + batch_size * n_vocab);
-                        }
+                        const float * batch_logits = llama_get_logits(ctx_tgt);
+                        all_logits.insert(all_logits.end(), batch_logits, batch_logits + batch_size * n_vocab);
                     } else {
                         SLT_ERR(slot, "echo prefill pass failed at batch %d (ret = %d)\n", batch_idx, ret);
                         decode_ok = false;
@@ -1887,6 +1884,9 @@ private:
                     }
                     llama_batch_free(batch);
                 }
+
+                // clean up our throwaway seq so it does not leak KV
+                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
 
                 if (!decode_ok) {
                     // fall back: mark all prompt tokens as null logprob
@@ -1907,9 +1907,7 @@ private:
                         // first prompt token has no conditioning context
                         ptok.prob = -std::numeric_limits<float>::infinity();
                     } else {
-                        const float * logits = num_batch > 1
-                            ? all_logits.data() + (i - 1) * n_vocab
-                            : llama_get_logits_ith(ctx_tgt, int(i - 1));
+                        const float * logits = all_logits.data() + (i - 1) * n_vocab;
 
                         if (logits != nullptr) {
                             float max_logit = logits[0];
