@@ -1846,13 +1846,25 @@ private:
                 // sequence, which is about to be prefilled anyway) and read
                 // the logits eagerly into a local buffer.
                 //
-                // NOTE: this clears the slot's KV via llama_memory_clear, which
-                // also clears OTHER slots' KV under -np N. To avoid the
-                // `pos_min == -1` crash in pre_decode, run the server with
-                // -np 1 when evaluating loglikelihood (echo) tasks. Concurrency
-                // support requires capturing logits during the normal prefill
-                // pass instead (TODO).
-                llama_memory_clear(llama_get_memory(ctx_tgt), true);
+                // CONCURRENCY: clear only THIS slot's KV via
+                // llama_memory_seq_rm(slot.id, -1, -1) rather than the global
+                // llama_memory_clear(data=true), which wiped every other slot's
+                // cached KV and tripped the `pos_min == -1` assertion in
+                // pre_decode under -np N. A throwaway seq_id like 1000000 does
+                // NOT work: KV cells index seq state in a fixed-size array of
+                // LLAMA_MAX_SEQ (256) entries, so seq_id >= 256 is out of bounds
+                // and silently corrupts memory (the earlier throwaway-seq
+                // attempt produced all-null prompt logprobs for this reason).
+                // slot.id is always in [0, n_parallel) < 256, so it is a safe
+                // seq to decode on. The subsequent normal prefill calls
+                // common_context_seq_rm(ctx_tgt, slot.id, 0, -1) (pos_next()==0
+                // since slot.prompt.tokens is empty here), so it erases this
+                // echo pass's KV before re-decoding the prompt for generation.
+                // This whole pass runs on the single server_loop thread
+                // (server_queue::start_loop), so there is no concurrent decode
+                // hazard between echo passes of different slots.
+                GGML_ASSERT((uint32_t) slot.id < llama_n_seq_max(ctx_tgt));
+                llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, -1, -1);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
                 const int n_vocab   = llama_vocab_n_tokens(vocab);
@@ -1871,7 +1883,7 @@ private:
 
                     llama_batch batch = llama_batch_init(batch_size, 0, 1);
                     for (int i = 0; i < batch_size; ++i) {
-                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {0}, true);
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {slot.id}, true);
                     }
 
                     const int ret = llama_decode(ctx_tgt, batch);
