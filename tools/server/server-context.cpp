@@ -53,7 +53,16 @@ static uint32_t server_n_outputs_max(const common_params & params) {
 
     const uint64_t n_outputs = (uint64_t) params.n_parallel * n_outputs_per_seq;
 
-    return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
+    // The legacy /v1/completions `echo` feature computes per-token prompt
+    // logprobs via a prefill pass that requests logits at every prompt
+    // position (a full batch of outputs). Reserve enough output capacity for
+    // a full batch so `echo` requests do not trip the
+    // `n_outputs_max <= cparams.n_outputs_max` assertion in output_reserve().
+    // This grows the logits buffer to n_batch * n_vocab floats (acceptable on
+    // large-GPU deployments); normal generation still only uses n_parallel
+    // outputs per batch.
+    (void) n_outputs;
+    return n_batch;
 }
 
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
@@ -1831,12 +1840,15 @@ private:
             if (n_probs > 0 && n_prompt > 1 && slot.prompt_token_probs.empty()) {
                 slot.prompt_token_probs.reserve(n_prompt);
 
-                // Separate prefill pass: clear the KV cache, decode the prompt
-                // with output logits at every position, then read logits to
-                // compute per-token logprobs. The subsequent normal prefill
-                // (in process_prompt) will rebuild the KV cache from the cached
-                // prefix, so this does not corrupt generation state.
-                llama_memory_clear(llama_get_memory(ctx_tgt), true);
+                // Separate prefill pass: decode the prompt on a throwaway
+                // sequence with output logits at every position, then read
+                // logits to compute per-token logprobs. We use a high seq_id
+                // that no slot ever uses (slots use ids 0..n_parallel-1) and
+                // clear it afterwards, so other slots' cached KV is preserved.
+                // The subsequent normal prefill (in process_prompt) runs on
+                // slot.id and is unaffected.
+                const llama_seq_id echo_seq = 1000000;
+                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
                 const int n_vocab   = llama_vocab_n_tokens(vocab);
@@ -1856,7 +1868,7 @@ private:
 
                     llama_batch batch = llama_batch_init(batch_size, 0, 1);
                     for (int i = 0; i < batch_size; ++i) {
-                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {0}, true);
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {echo_seq}, true);
                     }
 
                     if (llama_decode(ctx_tgt, batch) == 0) {
