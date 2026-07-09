@@ -801,10 +801,8 @@ json oaicompat_completion_params_parse(const json & body) {
         llama_params["stop"] = json_value(body, "stop", json::array());
     }
 
-    // Handle "echo" field
-    if (json_value(body, "echo", false)) {
-        throw std::runtime_error("Only no echo is supported");
-    }
+    // NOTE: "echo" is now supported (prompt logprobs via a separate prefill pass).
+    // It is parsed into params.chat_parser_params.echo by the schema (server-schema.cpp).
 
     // Params supported by OAI but unsupported by llama.cpp
     static const std::vector<std::string> unsupported_params { "best_of", "suffix" };

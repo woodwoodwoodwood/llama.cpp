@@ -10,6 +10,11 @@
 #include "speculative.h"
 #include "server-common.h"
 
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <unordered_map>
+
 using json = nlohmann::ordered_json;
 
 //
@@ -325,6 +330,76 @@ json completion_token_output::probs_vector_to_json(const std::vector<completion_
     return out;
 }
 
+json completion_token_output::oaicompat_probs_vector_to_json(
+        const std::vector<completion_token_output> & probs_out,
+        bool post_sampling_probs,
+        bool echo,
+        const std::vector<completion_token_output> & prompt_probs) {
+    // OpenAI legacy completions logprobs format:
+    //   { "text_offset": [int], "token_logprobs": [num|null],
+    //     "tokens": [str], "top_logprobs": [{str: num}|null] }
+    // When `echo` is true, prompt token logprobs are prepended to the
+    // generated token logprobs. The first token of the echoed prompt has a
+    // null logprob (no conditioning context).
+
+    std::vector<completion_token_output> all_probs;
+    if (echo && !prompt_probs.empty()) {
+        all_probs.insert(all_probs.end(), prompt_probs.begin(), prompt_probs.end());
+    }
+    all_probs.insert(all_probs.end(), probs_out.begin(), probs_out.end());
+
+    std::vector<std::string> tokens;
+    tokens.reserve(all_probs.size());
+    std::vector<int> text_offsets;
+    text_offsets.reserve(all_probs.size());
+    std::vector<std::optional<float>> token_logprobs;
+    token_logprobs.reserve(all_probs.size());
+    std::vector<std::optional<std::unordered_map<std::string, float>>> top_logprobs;
+    top_logprobs.reserve(all_probs.size());
+
+    int current_off = 0;
+    for (size_t i = 0; i < all_probs.size(); ++i) {
+        const auto & p = all_probs[i];
+
+        std::string piece = p.text_to_send;
+        piece.resize(validate_utf8(piece));
+        tokens.push_back(piece);
+        text_offsets.push_back(current_off);
+        current_off += static_cast<int>(piece.size());
+
+        // -inf prob marks positions with no logprob (first prompt token, or
+        // positions where logits were unavailable). Serialize as null.
+        if (std::isinf(p.prob) && p.prob < 0) {
+            token_logprobs.push_back(std::nullopt);
+            top_logprobs.push_back(std::nullopt);
+            continue;
+        }
+
+        const float logprob_value = post_sampling_probs
+            ? (p.prob > 0.0f ? std::log(p.prob) : -std::numeric_limits<float>::infinity())
+            : logarithm(p.prob);
+        token_logprobs.push_back(std::optional<float>(logprob_value));
+
+        std::unordered_map<std::string, float> top_map;
+        for (const auto & cand : p.probs) {
+            std::string cand_txt = cand.txt;
+            cand_txt.resize(validate_utf8(cand_txt));
+            const float cand_logprob = post_sampling_probs
+                ? (cand.prob > 0.0f ? std::log(cand.prob) : -std::numeric_limits<float>::infinity())
+                : logarithm(cand.prob);
+            top_map[cand_txt] = cand_logprob;
+        }
+        top_logprobs.push_back(std::move(top_map));
+    }
+
+    return json {
+        {"text_offset",    text_offsets},
+        {"token_logprobs", token_logprobs},
+        {"tokens",         tokens},
+        {"top_logprobs",   top_logprobs},
+    };
+}
+
 float completion_token_output::logarithm(float x) {
     // nlohmann::json converts -inf to null, so we need to prevent that
     return x == 0.0f ? std::numeric_limits<float>::lowest() : std::log(x);
@@ -398,19 +473,28 @@ json server_task_result_cmpl_final::usage_json_oaicompat() {
 json server_task_result_cmpl_final::to_json_oaicompat() {
     std::time_t t = std::time(0);
     json logprobs = json(nullptr); // OAI default to null
-    if (!stream && probs_output.size() > 0) {
-        logprobs = json{
-            {"content", completion_token_output::probs_vector_to_json(probs_output, post_sampling_probs)},
-        };
+    if (!stream && (probs_output.size() > 0 || (echo && prompt_probs_output.size() > 0))) {
+        logprobs = completion_token_output::oaicompat_probs_vector_to_json(
+            probs_output,
+            post_sampling_probs,
+            echo,
+            prompt_probs_output
+        );
     }
     json finish_reason = "length";
     if (stop == STOP_TYPE_WORD || stop == STOP_TYPE_EOS) {
         finish_reason = "stop";
     }
+    // With echo, the response text includes the echoed prompt followed by the
+    // generated content (non-stream only; streaming echoes via first chunk).
+    std::string response_text = content;
+    if (echo && !stream) {
+        response_text = prompt + content;
+    }
     json res = json {
         {"choices",            json::array({
             json{
-                {"text",          content},
+                {"text",          response_text},
                 {"index",         index},
                 {"logprobs",      logprobs},
                 {"finish_reason", finish_reason},
@@ -1089,14 +1173,21 @@ json server_task_result_cmpl_partial::to_json_oaicompat() {
     std::time_t t = std::time(0);
     json logprobs = json(nullptr); // OAI default to null
     if (prob_output.probs.size() > 0) {
-        logprobs = json{
-            {"content", completion_token_output::probs_vector_to_json({prob_output}, post_sampling_probs)},
-        };
+        logprobs = completion_token_output::oaicompat_probs_vector_to_json(
+            std::vector<completion_token_output>{prob_output},
+            post_sampling_probs,
+            echo
+        );
+    }
+    // With echo, the first streaming chunk prepends the echoed prompt text.
+    std::string response_text = content;
+    if (echo && is_first_chunk) {
+        response_text = prompt_text + content;
     }
     json res = json {
         {"choices",            json::array({
             json{
-                {"text",          content},
+                {"text",          response_text},
                 {"index",         index},
                 {"logprobs",      logprobs},
                 {"finish_reason", nullptr},

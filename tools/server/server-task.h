@@ -330,6 +330,17 @@ struct completion_token_output {
 
     static json probs_vector_to_json(const std::vector<completion_token_output> & probs, bool post_sampling_probs);
 
+    // OpenAI legacy completions logprobs format: produces the flat
+    // {text_offset, token_logprobs, tokens, top_logprobs} object. When `echo`
+    // is true and `prompt_probs` is non-empty, the prompt tokens' logprobs are
+    // prepended to the generated tokens' logprobs.
+    static json oaicompat_probs_vector_to_json(
+        const std::vector<completion_token_output> & probs_out,
+        bool post_sampling_probs,
+        bool echo,
+        const std::vector<completion_token_output> & prompt_probs = {}
+    );
+
     static float logarithm(float x);
 
     static std::vector<unsigned char> str_to_bytes(const std::string & str);
@@ -345,6 +356,8 @@ struct server_task_result_cmpl_final : server_task_result {
     result_timings timings;
     std::string prompt;
 
+    bool echo = false;
+
     bool truncated;
     int32_t n_decoded;
     int32_t n_prompt_tokens;
@@ -356,6 +369,7 @@ struct server_task_result_cmpl_final : server_task_result {
 
     bool post_sampling_probs;
     std::vector<completion_token_output> probs_output;
+    std::vector<completion_token_output> prompt_probs_output;
     std::vector<std::string>  response_fields;
 
     task_params generation_params;
@@ -426,6 +440,11 @@ struct server_task_result_cmpl_partial : server_task_result {
     completion_token_output prob_output;
     result_timings timings;
     result_prompt_progress progress;
+
+    // echo support (streaming): first chunk echoes the prompt text
+    bool echo = false;
+    std::string prompt_text;
+    bool is_first_chunk = false;
 
     // response formatting
     bool               verbose  = false;
