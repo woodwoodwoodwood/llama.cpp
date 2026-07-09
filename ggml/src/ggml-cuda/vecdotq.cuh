@@ -717,7 +717,7 @@ static __device__ __forceinline__ float vec_dot_q1_0_q8_1(
     return d1 * d8 * sumi;
 }
 
-#define VDR_GSQ2_Q8_1_MMVQ 1
+#define VDR_GSQ2_Q8_1_MMVQ 2
 #define VDR_GSQ2_Q8_1_MMQ  4
 
 // GSQ2: 128 elements (32 bytes, 4 codes/byte) with ONE scale, codebook {-2,-1,0,1}.
@@ -729,11 +729,14 @@ static __device__ __forceinline__ float vec_dot_gsq2_q8_1(
 
     const float d1 = bgsq2->d;
 
-    // Process only the 32-element chunk selected by iqs
-    const block_q8_1 * bq8_1_chunk = bq8_1 + iqs;
+    // mmvq passes iqs as an int32 index within the block, stepping by VDR (=2):
+    // a GSQ2 block (128 vals) spans 4 Q8_1 chunks; each chunk = 8 qs bytes = 2 int32.
+    // iqs in {0,2,4,6} -> chunk in {0,1,2,3}.
+    const int chunk = iqs / 2;
+    const block_q8_1 * bq8_1_chunk = bq8_1 + chunk;
 
     // Load 8 bytes (64 bits) = 32 x 2-bit codes for this chunk
-    const int offset = iqs * 8;
+    const int offset = chunk * 8;
     const int v0 = bgsq2->qs[offset + 0] | (bgsq2->qs[offset + 1] << 8) |
                    (bgsq2->qs[offset + 2] << 16) | (bgsq2->qs[offset + 3] << 24);
     const int v1 = bgsq2->qs[offset + 4] | (bgsq2->qs[offset + 5] << 8) |
