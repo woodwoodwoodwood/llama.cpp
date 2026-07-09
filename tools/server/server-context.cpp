@@ -1840,15 +1840,16 @@ private:
             if (n_probs > 0 && n_prompt > 1 && slot.prompt_token_probs.empty()) {
                 slot.prompt_token_probs.reserve(n_prompt);
 
-                // Separate prefill pass: decode the prompt on a throwaway
-                // sequence with output logits at every position, then read
-                // logits to compute per-token logprobs. We use a high seq_id
-                // that no slot ever uses (slots use ids 0..n_parallel-1) and
-                // clear it afterwards, so other slots' cached KV is preserved.
-                // The subsequent normal prefill (in process_prompt) runs on
-                // slot.id and is unaffected.
-                const llama_seq_id echo_seq = 1000000;
-                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
+                // Separate prefill pass: clear the KV cache and decode the
+                // prompt with output logits at every position, then read
+                // logits to compute per-token logprobs. This mirrors the
+                // approach of ggml-org/llama.cpp PR #15189. Because
+                // launch_slot_with_task and the main decode loop share one
+                // thread (server_queue::start_loop), there is no concurrent
+                // decode hazard. Clearing all KV means other slots will
+                // re-process their cached prefix on their next request (a
+                // throughput cost, not a correctness issue).
+                llama_memory_clear(llama_get_memory(ctx_tgt), true);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
                 const int n_vocab   = llama_vocab_n_tokens(vocab);
@@ -1862,27 +1863,41 @@ private:
                     all_logits.reserve(n_prompt * n_vocab);
                 }
 
+                bool decode_ok = true;
                 for (int batch_idx = 0; batch_idx < num_batch; ++batch_idx) {
                     const int batch_start = batch_idx * n_batch;
                     const int batch_size  = std::min(int(n_prompt) - batch_start, n_batch);
 
                     llama_batch batch = llama_batch_init(batch_size, 0, 1);
                     for (int i = 0; i < batch_size; ++i) {
-                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {echo_seq}, true);
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {0}, true);
                     }
 
-                    if (llama_decode(ctx_tgt, batch) == 0) {
+                    const int ret = llama_decode(ctx_tgt, batch);
+                    if (ret == 0) {
                         if (num_batch > 1) {
                             const float * batch_logits = llama_get_logits(ctx_tgt);
                             all_logits.insert(all_logits.end(), batch_logits, batch_logits + batch_size * n_vocab);
                         }
                     } else {
+                        SLT_ERR(slot, "echo prefill pass failed at batch %d (ret = %d)\n", batch_idx, ret);
+                        decode_ok = false;
                         llama_batch_free(batch);
                         break;
                     }
                     llama_batch_free(batch);
                 }
 
+                if (!decode_ok) {
+                    // fall back: mark all prompt tokens as null logprob
+                    for (size_t i = 0; i < n_prompt; ++i) {
+                        completion_token_output ptok;
+                        ptok.tok          = prompt_toks[i];
+                        ptok.text_to_send = common_token_to_piece(ctx_tgt, prompt_toks[i], true);
+                        ptok.prob = -std::numeric_limits<float>::infinity();
+                        slot.prompt_token_probs.push_back(std::move(ptok));
+                    }
+                } else {
                 for (size_t i = 0; i < n_prompt; ++i) {
                     completion_token_output ptok;
                     ptok.tok          = prompt_toks[i];
@@ -1939,6 +1954,7 @@ private:
 
                     slot.prompt_token_probs.push_back(std::move(ptok));
                 }
+                } // end decode_ok
             } else {
                 // no logprobs requested: still echo the prompt tokens (with null
                 // logprobs) so the token list is complete
