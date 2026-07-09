@@ -152,6 +152,7 @@ class ModelBase:
         self.dir_model_card = dir_model  # overridden in convert_lora_to_gguf.py
         self._is_nvfp4 = False
         self._is_mxfp4 = False
+        self._is_gsq2 = False
         self._fp8_as_q8 = fp8_as_q8
         self._fp8_dequantized: set[str] = set()
 
@@ -782,6 +783,114 @@ class ModelBase:
 
         del experts, merged
 
+    @staticmethod
+    def _gsq2_pack(weight_packed: Tensor, weight_scale: Tensor, weight_shape: Tensor) -> tuple[np.ndarray, list[int]]:
+        """Repack a GSQ compressed-tensors 'pack-quantized' 2-bit symmetric weight
+        (num_bits=2, group_size=128, LSB-first int32 packing) directly into the ggml
+        GSQ2 block layout WITHOUT any dequant/requant, preserving the trained codes.
+
+        GSQ2 block = 34 bytes per 128 values: f16 scale `d` (2 bytes, little-endian)
+        followed by 32 bytes of 2-bit codes (LSB-first, 4 codes/byte). Codes are in
+        {0,1,2,3} and dequant is w = (code - 2) * d. The compressed-tensors container
+        stores the identical unsigned codes with the identical symmetric offset
+        (2^(num_bits-1) = 2), so the codes copy over 1:1 and only the scale dtype
+        (bf16/f32 -> f16) changes.
+
+        Args:
+            weight_packed: int32 [N, K*2//32], LSB-first.
+            weight_scale:  bf16/f16/f32 [N, K//128].
+            weight_shape:  int [2] -> (N, K).
+        Returns: (raw uint8 [N, (K//128)*34], logical_shape [N, K]).
+        """
+        GROUP = 128
+        NUM_BITS = 2
+        BLOCK_BYTES = 2 + GROUP // 4  # 34
+
+        N, K = int(weight_shape[0]), int(weight_shape[1])
+        assert K % GROUP == 0, f"GSQ2 requires K divisible by {GROUP}, got K={K}"
+        n_groups = K // GROUP
+
+        wp = weight_packed.cpu().numpy().astype(np.int64)              # [N, K//16]
+        vals_per_i32 = 32 // NUM_BITS                                  # 16
+        shifts = np.arange(vals_per_i32, dtype=np.int64) * NUM_BITS
+        # LSB-first unpack -> unsigned codes in [0, 4)
+        codes = (wp[:, :, None] >> shifts[None, None, :]) & 0x3        # [N, K//16, 16]
+        codes = codes.reshape(N, -1)[:, :K].astype(np.uint16)         # [N, K]
+
+        # pack 4 codes per byte, LSB-first -> [N, n_groups, 32]
+        c = codes.reshape(N, K // 4, 4)
+        qs = (c[:, :, 0] | (c[:, :, 1] << 2) | (c[:, :, 2] << 4) | (c[:, :, 3] << 6)).astype(np.uint8)
+        qs = qs.reshape(N, n_groups, GROUP // 4)                       # [N, n_groups, 32]
+
+        # per-group f16 scale bytes (little-endian)
+        d = weight_scale.float().cpu().numpy().astype(np.float32)[:, :n_groups]
+        d16 = d.astype(np.float16).view(np.uint8).reshape(N, n_groups, 2)  # [N, n_groups, 2]
+
+        raw = np.concatenate([d16, qs], axis=-1).reshape(N, n_groups * BLOCK_BYTES)
+        return np.ascontiguousarray(raw), [N, K]
+
+    def _generate_gsq2_tensors(self):
+        """Directly repack GSQ 2-bit symmetric compressed-tensors MoE experts into
+        ggml GSQ2 tensors (no dequant / no requant). Runs before dequant_model so the
+        consumed weight_packed/weight_scale/weight_shape tensors are removed; any
+        remaining (non-quantized) tensors fall through to the normal bf16/f16 path."""
+        expert_blocks: dict[tuple[int, str], list[tuple[int, np.ndarray]]] = {}
+        expert_shapes: dict[tuple[int, str], list[int]] = {}
+        n_experts = self.find_hparam(["num_local_experts", "num_experts"], optional=True) or 0
+        consumed: list[str] = []
+
+        for name in list(self.model_tensors.keys()):
+            if not name.endswith(".weight_packed"):
+                continue
+            base = name.removesuffix("_packed")          # "....weight"
+            scale_name = base + "_scale"
+            shape_name = base + "_shape"
+            if scale_name not in self.model_tensors or shape_name not in self.model_tensors:
+                continue
+
+            wp = LazyTorchTensor.to_eager(self.model_tensors[name]())
+            ws = LazyTorchTensor.to_eager(self.model_tensors[scale_name]())
+            wsh = LazyTorchTensor.to_eager(self.model_tensors[shape_name]())
+            consumed += [name, scale_name, shape_name]
+
+            raw, shape = self._gsq2_pack(wp, ws, wsh)
+
+            m = re.search(r'\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$', base)
+            if m:
+                expert_id = int(m.group(1))
+                proj_type = m.group(2)
+                bid_m = re.search(r'\.layers\.(\d+)\.', base)
+                bid = int(bid_m.group(1)) if bid_m else 0
+                key = (bid, proj_type)
+                if key not in expert_blocks:
+                    expert_blocks[key] = []
+                    expert_shapes[key] = shape
+                expert_blocks[key].append((expert_id, raw.copy()))
+                if n_experts > 0 and len(expert_blocks[key]) >= n_experts:
+                    self._flush_gsq2_experts(key, expert_blocks, expert_shapes, bid, proj_type)
+            else:
+                # standalone (non-expert) quantized Linear -> write directly
+                new_name = self.map_tensor_name(base)
+                logger.info(f"Repacked {new_name} with shape {shape} and quantization GSQ2")
+                self.gguf_writer.add_tensor(new_name, raw, raw_dtype=gguf.GGMLQuantizationType.GSQ2)
+
+        for (bid, proj_type) in list(expert_blocks.keys()):
+            self._flush_gsq2_experts((bid, proj_type), expert_blocks, expert_shapes, bid, proj_type)
+
+        for name in consumed:
+            self.model_tensors.pop(name, None)
+
+    def _flush_gsq2_experts(self, key, expert_blocks, expert_shapes, bid, proj_type):
+        experts = expert_blocks.pop(key)
+        shape = expert_shapes.pop(key)
+        experts.sort(key=lambda x: x[0])
+        merged = np.stack([e[1] for e in experts], axis=0)   # [n_expert, N, n_groups*34]
+        merged_name = f"model.layers.{bid}.mlp.experts.{proj_type}.weight"
+        new_name = self.map_tensor_name(merged_name)
+        logger.info(f"Repacked {new_name} with shape [{len(experts)}, {shape[0]}, {shape[1]}] and quantization GSQ2")
+        self.gguf_writer.add_tensor(new_name, merged, raw_dtype=gguf.GGMLQuantizationType.GSQ2)
+        del experts, merged
+
     def prepare_tensors(self):
         # detect NVFP4 quantization (ModelOpt and Compressed-tensors formats)
         quantization_config = self.hparams.get("quantization_config") or {}
@@ -851,6 +960,23 @@ class ModelBase:
                         if input_scale_name not in self.model_tensors:
                             self.model_tensors[input_scale_name] = inverse_scale(self.model_tensors.pop(name))
             self._generate_nvfp4_tensors()
+
+        # Detect GSQ 2-bit symmetric group-quantized checkpoints (compressed-tensors
+        # 'pack-quantized', num_bits=2, group_size=128, symmetric). Repack the MoE
+        # experts directly into ggml GSQ2 (no dequant/requant). Must run before
+        # dequant_model so the consumed packed tensors are removed; any remaining
+        # non-quantized tensors then go through the normal bf16/f16 path.
+        gsq2_weights = None
+        if quant_method == "compressed-tensors" and quant_format == "pack-quantized" and len(quant_groups) == 1:
+            gw = tuple(quant_groups.values())[0].get("weights", {}) or {}
+            if (gw.get("num_bits") == 2 and gw.get("group_size") == 128
+                    and gw.get("symmetric") is True
+                    and gw.get("type", "int") == "int"
+                    and gw.get("strategy") == "group"):
+                gsq2_weights = gw
+        self._is_gsq2 = gsq2_weights is not None
+        if self._is_gsq2:
+            self._generate_gsq2_tensors()
 
         self.dequant_model()
 
@@ -1000,6 +1126,8 @@ class ModelBase:
                 self.ftype = gguf.LlamaFileType.MOSTLY_NVFP4
             elif self._is_mxfp4:
                 self.ftype = gguf.LlamaFileType.MOSTLY_MXFP4_MOE
+            elif self._is_gsq2:
+                self.ftype = gguf.LlamaFileType.MOSTLY_GSQ2
 
         # Generate parameter weight class (useful for leader boards) if not yet determined
         if self.metadata.size_label is None and total_params > 0:
