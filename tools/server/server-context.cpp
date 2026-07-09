@@ -1840,25 +1840,27 @@ private:
             if (n_probs > 0 && n_prompt > 1 && slot.prompt_token_probs.empty()) {
                 slot.prompt_token_probs.reserve(n_prompt);
 
-                // Separate prefill pass on a throwaway sequence (a high seq_id
-                // that no slot ever uses) so we can request logits at every
-                // prompt position WITHOUT clearing the shared KV cache (which
-                // would destroy other slots' cached state under -np N and trip
-                // the `pos_min == -1` assertion in pre_decode). We clear only
-                // our throwaway seq before and after. This is single-threaded
-                // with the main decode loop (server_queue::start_loop).
-                const llama_seq_id echo_seq = 1000000;
-                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
+                // Separate prefill pass: decode the prompt with output logits
+                // at every position, then read logits to compute per-token
+                // logprobs. We decode on seq_id == slot.id (the slot's own
+                // sequence, which is about to be prefilled anyway) and read
+                // the logits eagerly into a local buffer.
+                //
+                // NOTE: this clears the slot's KV via llama_memory_clear, which
+                // also clears OTHER slots' KV under -np N. To avoid the
+                // `pos_min == -1` crash in pre_decode, run the server with
+                // -np 1 when evaluating loglikelihood (echo) tasks. Concurrency
+                // support requires capturing logits during the normal prefill
+                // pass instead (TODO).
+                llama_memory_clear(llama_get_memory(ctx_tgt), true);
 
                 const int n_batch   = llama_n_batch(ctx_tgt);
                 const int n_vocab   = llama_vocab_n_tokens(vocab);
                 const int num_batch = (int(n_prompt) + n_batch - 1) / n_batch;
 
                 // Always accumulate logits into a local buffer right after each
-                // decode (rather than reading them later via llama_get_logits_ith,
-                // which may be invalidated by the subsequent normal prefill). Each
-                // token's logprob is computed from the logits of the PREVIOUS
-                // position, so we keep all of them.
+                // decode. Each token's logprob is computed from the logits of
+                // the PREVIOUS position, so we keep all of them.
                 std::vector<float> all_logits;
                 all_logits.reserve(n_prompt * n_vocab);
 
@@ -1869,7 +1871,7 @@ private:
 
                     llama_batch batch = llama_batch_init(batch_size, 0, 1);
                     for (int i = 0; i < batch_size; ++i) {
-                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {echo_seq}, true);
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {0}, true);
                     }
 
                     const int ret = llama_decode(ctx_tgt, batch);
@@ -1884,9 +1886,6 @@ private:
                     }
                     llama_batch_free(batch);
                 }
-
-                // clean up our throwaway seq so it does not leak KV
-                llama_memory_seq_rm(llama_get_memory(ctx_tgt), echo_seq, -1, -1);
 
                 if (!decode_ok) {
                     // fall back: mark all prompt tokens as null logprob
