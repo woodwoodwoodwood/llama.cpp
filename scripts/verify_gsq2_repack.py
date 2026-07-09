@@ -20,6 +20,7 @@ import json
 import os
 
 import numpy as np
+import torch
 from safetensors import safe_open
 
 GROUP = 128
@@ -96,10 +97,14 @@ def load_bundle(model_dir, pattern):
         byshard[wm[k]].append(k)
     out = {}
     for shard, ks in byshard.items():
-        with safe_open(os.path.join(model_dir, shard), framework="np") as f:
+        # use torch framework so bf16 weight_scale loads; convert to numpy afterwards
+        with safe_open(os.path.join(model_dir, shard), framework="pt") as f:
             for k in ks:
                 out[k] = f.get_tensor(k)
-    return prefix, out[f"{prefix}.weight_packed"], out[f"{prefix}.weight_scale"], out[f"{prefix}.weight_shape"]
+    wp = out[f"{prefix}.weight_packed"].numpy()
+    ws = out[f"{prefix}.weight_scale"].float().numpy()
+    wsh = out[f"{prefix}.weight_shape"].numpy()
+    return prefix, wp, ws, wsh
 
 
 def main():
