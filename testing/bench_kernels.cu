@@ -175,9 +175,9 @@ int main(int argc, char ** argv) {
     printf("%-22s %12s %16s\n", "kernel", "sec/iter", "throughput");
     printf("----------------------------------------------------------\n");
 
-    printf("\n[DEQUANT] n=%lld\n", (long long)(n_rows*n_cols));
-    bench_dequant(B, GGML_TYPE_GSQ2, n_rows*n_cols);
-    bench_dequant(B, GGML_TYPE_Q2_K, n_rows*n_cols);
+    // printf("\n[DEQUANT] n=%lld\n", (long long)(n_rows*n_cols));
+    // bench_dequant(B, GGML_TYPE_GSQ2, n_rows*n_cols);
+    // bench_dequant(B, GGML_TYPE_Q2_K, n_rows*n_cols);
 
     printf("\n[MMVQ] batch=1 (mul_mat_vec_q)\n");
     bench_mul_mat(B, GGML_TYPE_GSQ2, n_rows, n_cols, 1);
