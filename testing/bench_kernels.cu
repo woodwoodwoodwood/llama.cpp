@@ -5,7 +5,7 @@
 //   2. MMVQ:    ggml_mul_mat(quant, F32 vec)      — batch=1，走 mul_mat_vec_q 内核
 //   3. MMQ:     ggml_mul_mat(quant, F32 matrix)   — batch 大，走 mul_mat_q (MMQ) 内核
 //
-// 编译（在已构建的 build 目录下；需先 cmake --build . -j 产出 ggml 库）：
+// 编译（在已构建的 build 目录下）：
 //   nvcc -O2 -std=c++17 -I../include -I../ggml/include \
 //       testing/bench_kernels.cu \
 //       -L./bin -lggml -lggml-base -lggml-cpu -lggml-cuda \
@@ -44,12 +44,10 @@ static std::vector<uint8_t> quantize_row(enum ggml_type type, int64_t n, const f
 
 struct Bench {
     ggml_backend_t backend;
-    ggml_backend_buffer_type_t buft;
     int iters;
 };
 
 // ---------- DEQUANT ----------
-// a: [n] 量化 -> b: [n] f32，通过 ggml_cpy 触发 dequantize
 static void bench_dequant(Bench & B, enum ggml_type type, int64_t n) {
     std::vector<float> src(n);
     for (int64_t i = 0; i < n; i++) src[i] = (float)((rand()%2000)-1000)/500.0f;
@@ -59,24 +57,21 @@ static void bench_dequant(Bench & B, enum ggml_type type, int64_t n) {
     struct ggml_context * ctx = ggml_init(p);
 
     ggml_tensor * a = ggml_new_tensor_1d(ctx, type, n);
-    ggml_set_input(a);
     ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
-    ggml_set_output(b);
     ggml_tensor * out = ggml_cpy(ctx, a, b);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
 
-    // Allocate graph
-    ggml_gallocr_t galloc = ggml_gallocr_new(B.buft);
-    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
-        fprintf(stderr, "alloc graph failed for dequant\n");
-        ggml_gallocr_free(galloc);
+    // Allocate all tensors using backend (like test-backend-ops.cpp does)
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, B.backend);
+    if (buf == NULL) {
+        fprintf(stderr, "failed to allocate tensors for dequant\n");
         ggml_free(ctx);
         return;
     }
 
-    // Set tensor data after allocation
+    // Set input data
     ggml_backend_tensor_set(a, qbytes.data(), 0, qbytes.size());
 
     // warmup
@@ -92,7 +87,7 @@ static void bench_dequant(Bench & B, enum ggml_type type, int64_t n) {
     printf("%-22s %12.6f %14.3f M elem/s\n",
            (std::string(ggml_type_name(type))+" dequant").c_str(), sec, n/sec/1e6);
 
-    ggml_gallocr_free(galloc);
+    ggml_backend_buffer_free(buf);
     ggml_free(ctx);
 }
 
@@ -120,25 +115,21 @@ static void bench_mul_mat(Bench & B, enum ggml_type type, int64_t n_rows, int64_
 
     // a: [ne0=n_cols, ne1=n_rows] 量化； b: [ne0=n_cols, ne1=batch] f32
     ggml_tensor * a = ggml_new_tensor_2d(ctx, type, n_cols, n_rows);
-    ggml_set_input(a);
     ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_cols, batch);
-    ggml_set_input(b);
     ggml_tensor * out = ggml_mul_mat(ctx, a, b);
-    ggml_set_output(out);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
 
-    // Allocate graph
-    ggml_gallocr_t galloc = ggml_gallocr_new(B.buft);
-    if (!ggml_gallocr_alloc_graph(galloc, gf)) {
-        fprintf(stderr, "alloc graph failed for mul_mat\n");
-        ggml_gallocr_free(galloc);
+    // Allocate all tensors using backend
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, B.backend);
+    if (buf == NULL) {
+        fprintf(stderr, "failed to allocate tensors for mul_mat\n");
         ggml_free(ctx);
         return;
     }
 
-    // Set tensor data after allocation
+    // Set input data
     ggml_backend_tensor_set(a, wq.data(), 0, wq.size());
     ggml_backend_tensor_set(b, in.data(), 0, in.size()*sizeof(float));
 
@@ -157,7 +148,7 @@ static void bench_mul_mat(Bench & B, enum ggml_type type, int64_t n_rows, int64_
     printf("%-22s %12.6f %14.3f M %s/s\n",
            (std::string(ggml_type_name(type))+" "+tag).c_str(), sec, work/sec/1e6, tag);
 
-    ggml_gallocr_free(galloc);
+    ggml_backend_buffer_free(buf);
     ggml_free(ctx);
 }
 
@@ -170,7 +161,6 @@ int main(int argc, char ** argv) {
 
     ggml_backend_t backend = ggml_backend_cuda_init(0);
     if (!backend) { fprintf(stderr, "cuda backend init failed\n"); return 1; }
-    ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(backend);
 
     // 列对齐到 256（GSQ2=128 / Q2_K=256 的公倍数）
     n_cols = (n_cols / 256) * 256;
@@ -180,7 +170,7 @@ int main(int argc, char ** argv) {
     printf("n_rows=%lld n_cols=%lld mmq_batch=%lld iters=%d\n\n",
            (long long)n_rows, (long long)n_cols, (long long)mmq_batch, iters);
 
-    Bench B{backend, buft, iters};
+    Bench B{backend, iters};
 
     printf("%-22s %12s %16s\n", "kernel", "sec/iter", "throughput");
     printf("----------------------------------------------------------\n");
