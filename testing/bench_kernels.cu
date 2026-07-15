@@ -84,8 +84,8 @@ static void bench_dequant(Bench & B, enum ggml_type type, int64_t n) {
     }
     double sec = (now_s() - t0) / B.iters;
 
-    printf("%-22s %12.6f %14.3f M elem/s\n",
-           (std::string(ggml_type_name(type))+" dequant").c_str(), sec, n/sec/1e6);
+    printf("%-22s %14.3f us\n",
+           (std::string(ggml_type_name(type))+" dequant").c_str(), sec*1e6);
 
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
@@ -145,8 +145,8 @@ static void bench_mul_mat(Bench & B, enum ggml_type type, int64_t n_rows, int64_
 
     double work = (batch == 1) ? (double)n_rows : (double)n_rows * batch;
     const char * tag = (batch == 1) ? "mmvq" : "mmq";
-    printf("%-22s %12.6f %14.3f M %s/s\n",
-           (std::string(ggml_type_name(type))+" "+tag).c_str(), sec, work/sec/1e6, tag);
+    printf("%-22s %14.3f us\n",
+           (std::string(ggml_type_name(type))+" "+tag).c_str(), sec*1e6);
 
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
@@ -172,7 +172,7 @@ int main(int argc, char ** argv) {
 
     Bench B{backend, iters};
 
-    printf("%-22s %12s %16s\n", "kernel", "sec/iter", "throughput");
+    printf("%-22s %14s\n", "kernel", "time (us)");
     printf("----------------------------------------------------------\n");
 
     // printf("\n[DEQUANT] n=%lld\n", (long long)(n_rows*n_cols));
@@ -187,7 +187,7 @@ int main(int argc, char ** argv) {
     bench_mul_mat(B, GGML_TYPE_GSQ2, n_rows, n_cols, mmq_batch);
     bench_mul_mat(B, GGML_TYPE_Q2_K, n_rows, n_cols, mmq_batch);
 
-    printf("\n注:\n  dequant: M 元素/秒\n  mmvq: M 行/秒 (batch=1=单token)\n  mmq: M 点积/秒 (行×batch)\n");
+    printf("\n注: 时间单位为微秒 (us)，越低越快\n");
     ggml_backend_free(backend);
     return 0;
 }
