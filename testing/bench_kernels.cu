@@ -53,7 +53,7 @@ static void bench_dequant(Bench & B, enum ggml_type type, int64_t n) {
     for (int64_t i = 0; i < n; i++) src[i] = (float)((rand()%2000)-1000)/500.0f;
     auto qbytes = quantize_row(type, n, src.data());
 
-    struct ggml_init_params p = { .mem_size = 1024*1024*1024, .mem_buffer = nullptr };
+    struct ggml_init_params p = { .mem_size = 1024*1024*1024, .mem_buffer = nullptr, .no_alloc = true };
     struct ggml_context * ctx = ggml_init(p);
 
     ggml_tensor * a = ggml_new_tensor_1d(ctx, type, n);
@@ -110,7 +110,7 @@ static void bench_mul_mat(Bench & B, enum ggml_type type, int64_t n_rows, int64_
     // 输入
     std::vector<float> in(n_cols * batch, 0.5f);
 
-    struct ggml_init_params p = { .mem_size = 1024*1024*1024, .mem_buffer = nullptr };
+    struct ggml_init_params p = { .mem_size = 1024*1024*1024, .mem_buffer = nullptr, .no_alloc = true };
     struct ggml_context * ctx = ggml_init(p);
 
     // a: [ne0=n_cols, ne1=n_rows] 量化； b: [ne0=n_cols, ne1=batch] f32
