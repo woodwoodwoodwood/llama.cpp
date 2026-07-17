@@ -670,7 +670,18 @@ class ModelBase:
                 self.match_model_tensor_name(new_name, key, bid)
                 for key in (gguf.MODEL_TENSOR.TOKEN_EMBD, gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD)
             )
-            if not is_gate_inp and not is_embd:
+            # Exclude special tensors that must stay F32/F16 (conv1d, time-mix, etc.)
+            is_special = any(
+                self.match_model_tensor_name(new_name, key, bid)
+                for key in (
+                    gguf.MODEL_TENSOR.SSM_CONV1D,
+                    gguf.MODEL_TENSOR.SHORTCONV_CONV,
+                    gguf.MODEL_TENSOR.SSM_CONV1D_Q,
+                    gguf.MODEL_TENSOR.SSM_CONV1D_K,
+                    gguf.MODEL_TENSOR.SSM_CONV1D_V,
+                )
+            )
+            if not is_gate_inp and not is_embd and not is_special:
                 return self._nonexpert_quant
         return False
 
