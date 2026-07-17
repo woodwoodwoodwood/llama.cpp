@@ -152,6 +152,14 @@ def parse_args() -> argparse.Namespace:
         "--fp8-as-q8", action="store_true",
         help="Store tensors dequantized from FP8 as Q8_0 instead of BF16/F16.",
     )
+    parser.add_argument(
+        "--nonexpert-quant", choices=["q8_0", "q4_0"], default=None,
+        help=(
+            "RTN-quantize the non-expert (attention/shared_expert/lm_head/etc.) "
+            "bf16 2D weights into the given ggml quant type, leaving GSQ2 routed "
+            "experts untouched. Useful to cut decode bandwidth on memory-limited GPUs."
+        ),
+    )
 
     parser.add_argument(
         "--target-model-dir", type=str, default=None,
@@ -281,6 +289,7 @@ def main() -> None:
                                      target_model_dir=Path(args.target_model_dir) if args.target_model_dir else None,
                                      fuse_gate_up_exps=args.fuse_gate_up_exps,
                                      fp8_as_q8=args.fp8_as_q8,
+                                     nonexpert_quant=args.nonexpert_quant,
                                      )
 
         if args.vocab_only:

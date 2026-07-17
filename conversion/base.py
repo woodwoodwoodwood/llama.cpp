@@ -122,7 +122,8 @@ class ModelBase:
                  sentence_transformers_dense_modules: bool = False,
                  target_model_dir: Path | None = None,
                  fuse_gate_up_exps: bool = False,
-                 fp8_as_q8: bool = False):
+                 fp8_as_q8: bool = False,
+                 nonexpert_quant: str | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -155,6 +156,16 @@ class ModelBase:
         self._is_gsq2 = False
         self._fp8_as_q8 = fp8_as_q8
         self._fp8_dequantized: set[str] = set()
+        # Map --nonexpert-quant option string to a ggml quant type.
+        # When set, non-expert 2D .weight tensors are RTN-quantized into this type
+        # instead of being written as bf16. GSQ2 routed experts are already written
+        # directly (and removed from model_tensors) before the main loop, so they
+        # never reach tensor_force_quant and remain bit-exact.
+        _ne_map = {"q8_0": gguf.GGMLQuantizationType.Q8_0,
+                   "q4_0": gguf.GGMLQuantizationType.Q4_0}
+        self._nonexpert_quant: gguf.GGMLQuantizationType | None = (
+            _ne_map[nonexpert_quant] if nonexpert_quant else None
+        )
 
         # Apply heuristics to figure out typical tensor encoding based on first tensor's dtype
         # NOTE: can't use field "torch_dtype" in config.json, because some finetunes lie.
@@ -645,6 +656,22 @@ class ModelBase:
         # Force FP8-original tensors to Q8_0 when requested; Q8_0 is faster than F16/BF16.
         if self._fp8_as_q8 and name in self._fp8_dequantized and n_dims >= 2:
             return gguf.GGMLQuantizationType.Q8_0
+        # --nonexpert-quant: RTN-quantize non-expert 2D .weight tensors (attention,
+        # shared_expert, lm_head, etc.) into the requested type. The GSQ2 routed
+        # experts never reach here (already written & removed in _generate_gsq2_tensors).
+        # Skip routing gates (FFN_GATE_INP/FFN_GATE_INP_SHEXP) and embeddings which
+        # are routing-sensitive or not decode-matvec bottlenecks.
+        if self._nonexpert_quant is not None and n_dims >= 2 and name.endswith(".weight"):
+            is_gate_inp = any(
+                self.match_model_tensor_name(new_name, key, bid)
+                for key in (gguf.MODEL_TENSOR.FFN_GATE_INP, gguf.MODEL_TENSOR.FFN_GATE_INP_SHEXP)
+            )
+            is_embd = any(
+                self.match_model_tensor_name(new_name, key, bid)
+                for key in (gguf.MODEL_TENSOR.TOKEN_EMBD, gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD)
+            )
+            if not is_gate_inp and not is_embd:
+                return self._nonexpert_quant
         return False
 
     # some models need extra generated tensors (like rope_freqs)
