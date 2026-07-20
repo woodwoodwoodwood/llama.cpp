@@ -275,7 +275,57 @@ static __global__ void mul_mat_vec_f(
                 gate_x2 = (const nv_bfloat162 *) gate_x;
             }
         }
-        for (int col2 = tid; col2 < ncols2; col2 += block_size) {
+
+        // 128-bit vectorized main loop: each thread loads an int4 (16 bytes = 8 bf16
+        // = 4 nv_bfloat162) per iteration instead of a single 32-bit nv_bfloat162,
+        // cutting load-instruction count to 1/4 and improving bandwidth utilization
+        // on bandwidth-limited GPUs. Requires x/gate_x rows to be 16-byte aligned;
+        // ggml pads rows so the base pointer is aligned, and we step over whole int4
+        // units. The scalar tail below handles the remaining < 4 nv_bfloat162.
+        // Numerically identical to the scalar path (same bf16->float mad order).
+        constexpr int vals_per_i4 = 4; // nv_bfloat162 per int4
+        const int ncols_i4 = ncols2 / vals_per_i4;
+        const bool aligned = (((uintptr_t) x2) % 16 == 0)
+            && (!has_fusion || !use_gate || (((uintptr_t) gate_x2) % 16 == 0));
+
+        int col2 = tid;
+        if (aligned) {
+            const int4 * x4 = (const int4 *) x2;
+            [[maybe_unused]] const int4 * gate_x4 = (const int4 *) gate_x2;
+            for (int col4 = tid; col4 < ncols_i4; col4 += block_size) {
+                const int4 rawx = x4[col4];
+                const nv_bfloat162 * tx = (const nv_bfloat162 *) &rawx;
+                int4 rawg;
+                [[maybe_unused]] const nv_bfloat162 * tg = nullptr;
+                if constexpr (has_fusion) {
+                    if (use_gate) {
+                        rawg = gate_x4[col4];
+                        tg = (const nv_bfloat162 *) &rawg;
+                    }
+                }
+#pragma unroll
+                for (int k = 0; k < vals_per_i4; ++k) {
+                    const int c2 = col4*vals_per_i4 + k;
+#pragma unroll
+                    for (int j = 0; j < ncols_dst; ++j) {
+                        const float2 tmpy = y2[j*stride_col_y2 + c2];
+                        ggml_cuda_mad(sumf[j], tx[k].x, tmpy.x);
+                        ggml_cuda_mad(sumf[j], tx[k].y, tmpy.y);
+
+                        if constexpr (has_fusion) {
+                            if (use_gate) {
+                                ggml_cuda_mad(sumf_gate[j], tg[k].x, tmpy.x);
+                                ggml_cuda_mad(sumf_gate[j], tg[k].y, tmpy.y);
+                            }
+                        }
+                    }
+                }
+            }
+            // scalar tail for the remaining nv_bfloat162 that don't fill a full int4
+            col2 = ncols_i4*vals_per_i4 + tid;
+        }
+
+        for (; col2 < ncols2; col2 += block_size) {
             const nv_bfloat162 tmpx = x2[col2];
             [[maybe_unused]] nv_bfloat162 tmpx_gate;
             if constexpr (has_fusion) {
