@@ -162,6 +162,9 @@ class ModelBase:
         # directly (and removed from model_tensors) before the main loop, so they
         # never reach tensor_force_quant and remain bit-exact.
         _ne_map = {"q8_0": gguf.GGMLQuantizationType.Q8_0,
+                   "q6_k": gguf.GGMLQuantizationType.Q6_K,
+                   "q5_k": gguf.GGMLQuantizationType.Q5_K,
+                   "q4_k": gguf.GGMLQuantizationType.Q4_K,
                    "q4_0": gguf.GGMLQuantizationType.Q4_0}
         self._nonexpert_quant: gguf.GGMLQuantizationType | None = (
             _ne_map[nonexpert_quant] if nonexpert_quant else None

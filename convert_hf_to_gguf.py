@@ -153,11 +153,13 @@ def parse_args() -> argparse.Namespace:
         help="Store tensors dequantized from FP8 as Q8_0 instead of BF16/F16.",
     )
     parser.add_argument(
-        "--nonexpert-quant", choices=["q8_0", "q4_0"], default=None,
+        "--nonexpert-quant", choices=["q8_0", "q6_k", "q5_k", "q4_k", "q4_0"], default=None,
         help=(
-            "RTN-quantize the non-expert (attention/shared_expert/lm_head/etc.) "
-            "bf16 2D weights into the given ggml quant type, leaving GSQ2 routed "
-            "experts untouched. Useful to cut decode bandwidth on memory-limited GPUs."
+            "Quantize the non-expert (attention/shared_expert/lm_head/etc.) bf16 2D "
+            "weights into the given ggml quant type, leaving GSQ2 routed experts "
+            "untouched. Cuts decode bandwidth on memory-limited GPUs. K-quants "
+            "(q6_k/q5_k/q4_k) use super-block scales and preserve accuracy better "
+            "than the plain-RTN q8_0/q4_0 at a given bit width."
         ),
     )
 
