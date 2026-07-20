@@ -162,6 +162,15 @@ def parse_args() -> argparse.Namespace:
             "than the plain-RTN q8_0/q4_0 at a given bit width."
         ),
     )
+    parser.add_argument(
+        "--nonexpert-quant-scope", type=str, default="all",
+        help=(
+            "Which non-expert groups --nonexpert-quant applies to: 'all' (default) or "
+            "a comma-separated subset of {attn,shexp,output}. E.g. 'attn' quantizes "
+            "only attention and keeps shared_expert/lm_head at bf16, useful to isolate "
+            "the per-group accuracy impact."
+        ),
+    )
 
     parser.add_argument(
         "--target-model-dir", type=str, default=None,
@@ -292,6 +301,7 @@ def main() -> None:
                                      fuse_gate_up_exps=args.fuse_gate_up_exps,
                                      fp8_as_q8=args.fp8_as_q8,
                                      nonexpert_quant=args.nonexpert_quant,
+                                     nonexpert_quant_scope=args.nonexpert_quant_scope,
                                      )
 
         if args.vocab_only:

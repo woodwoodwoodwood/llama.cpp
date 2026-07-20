@@ -123,7 +123,8 @@ class ModelBase:
                  target_model_dir: Path | None = None,
                  fuse_gate_up_exps: bool = False,
                  fp8_as_q8: bool = False,
-                 nonexpert_quant: str | None = None):
+                 nonexpert_quant: str | None = None,
+                 nonexpert_quant_scope: str = "all"):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -168,6 +169,13 @@ class ModelBase:
                    "q4_0": gguf.GGMLQuantizationType.Q4_0}
         self._nonexpert_quant: gguf.GGMLQuantizationType | None = (
             _ne_map[nonexpert_quant] if nonexpert_quant else None
+        )
+        # Which non-expert groups the quantization applies to. "all" = attn + shexp
+        # + output(lm_head). Otherwise a comma-separated subset of {attn,shexp,output}.
+        # Lets one isolate the accuracy impact per group (e.g. keep lm_head bf16).
+        self._nonexpert_quant_scope: set[str] = (
+            {"attn", "shexp", "output"} if nonexpert_quant_scope == "all"
+            else {s.strip() for s in nonexpert_quant_scope.split(",") if s.strip()}
         )
 
         # Apply heuristics to figure out typical tensor encoding based on first tensor's dtype
@@ -684,7 +692,26 @@ class ModelBase:
                     gguf.MODEL_TENSOR.SSM_CONV1D_V,
                 )
             )
-            if not is_gate_inp and not is_embd and not is_special:
+            if is_gate_inp or is_embd or is_special:
+                return False
+            # Restrict to the requested scope so the per-group accuracy impact can
+            # be isolated (e.g. quantize attn only, keep lm_head/shared bf16).
+            is_output = self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.OUTPUT, bid)
+            is_shexp = any(
+                self.match_model_tensor_name(new_name, key, bid)
+                for key in (
+                    gguf.MODEL_TENSOR.FFN_GATE_SHEXP,
+                    gguf.MODEL_TENSOR.FFN_UP_SHEXP,
+                    gguf.MODEL_TENSOR.FFN_DOWN_SHEXP,
+                )
+            )
+            if is_output:
+                group = "output"
+            elif is_shexp:
+                group = "shexp"
+            else:
+                group = "attn"  # everything else remaining is attention-side
+            if group in self._nonexpert_quant_scope:
                 return self._nonexpert_quant
         return False
 

@@ -552,6 +552,88 @@ class Q5_K(__Quant, qtype=GGMLQuantizationType.Q5_K):
 
 class Q6_K(__Quant, qtype=GGMLQuantizationType.Q6_K):
     @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        n_blocks = blocks.shape[0]
+
+        # 16 sub-blocks of 16 elements per super-block; each has an int8 scale,
+        # and one f16 super-scale d. q6 codes are signed in [-32, 31].
+        # This mirrors dequantize_blocks: w = d * scale_i8 * (q - 32).
+        blocks = blocks.reshape((n_blocks, QK_K // 16, 16))
+
+        # per sub-block absmax -> ideal sub-scale (symmetric 6-bit: max level 32)
+        submax = np.abs(blocks).max(axis=-1)                       # (n, 16)
+        sub_scale = submax / 32.0                                  # (n, 16)
+
+        # super-scale d so that int8 sub-scales fit in [-127, 127]
+        d = np.abs(sub_scale).max(axis=-1, keepdims=True) / 127.0  # (n, 1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv_d = np.where(d == 0, 0.0, 1.0 / d)
+        scales_i8 = np.clip(np_roundf(sub_scale * inv_d), -127, 127).astype(np.int8)  # (n,16)
+
+        # effective per-sub-block scale actually stored, then quantize the values
+        eff_scale = (d * scales_i8.astype(np.float32)).reshape((n_blocks, QK_K // 16, 1))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            inv_eff = np.where(eff_scale == 0, 0.0, 1.0 / eff_scale)
+        q = np_roundf(blocks * inv_eff)                            # (n,16,16), signed
+        q = np.clip(q + 32, 0, 63).astype(np.uint8).reshape((n_blocks, QK_K))  # unsigned 6-bit
+        # q is indexed by the dequant output order s in [0, 256). Split into the
+        # low 4 bits (-> ql) and high 2 bits (-> qh), then scatter each 4-/2-bit
+        # code back to the exact byte/shift position that dequantize_blocks reads
+        # from, using its inverse index map (computed once, cached).
+        ql_low = (q & 0x0F).astype(np.uint8)                       # (n, 256)
+        qh_hi = ((q >> 4) & 0x03).astype(np.uint8)                 # (n, 256)
+
+        ql_map, qh_map = cls._pack_maps()
+        ql = np.zeros((n_blocks, QK_K // 2), dtype=np.uint8)
+        for s in range(QK_K):
+            byte, shift = ql_map[s]
+            ql[:, byte] |= ql_low[:, s] << shift
+        qh = np.zeros((n_blocks, QK_K // 4), dtype=np.uint8)
+        for s in range(QK_K):
+            byte, shift = qh_map[s]
+            qh[:, byte] |= qh_hi[:, s] << shift
+
+        d = d.astype(np.float16).view(np.uint8)                    # (n, 2)
+        scales_u8 = scales_i8.view(np.uint8)                       # (n, 16)
+
+        return np.concatenate([ql, qh, scales_u8, d], axis=-1)
+
+    _ql_map_cache = None
+    _qh_map_cache = None
+
+    @classmethod
+    def _pack_maps(cls):
+        """Return (ql_map, qh_map): for each output index s in [0,256), the
+        (byte, shift) location in ql/qh that dequantize_blocks reads it from.
+        Derived by running the dequant index arithmetic on identity markers."""
+        if cls._ql_map_cache is not None:
+            return cls._ql_map_cache, cls._qh_map_cache
+
+        # ql: bytes idx in [0,128), each contributes to two outputs via >>[0,4].
+        # Reproduce: ql.reshape(1,-1,1,64) >> [0,4] -> (1,2,2,64) -> reshape(1,-1,32)=(1,8,32).
+        # Encode each ql byte b as value (b<<0) and (b<<? ) markers to trace.
+        idx = np.arange(128, dtype=np.int32).reshape(1, -1, 1, 64)
+        half = np.array([0, 1], dtype=np.int32).reshape(1, 1, 2, 1)  # 0=low nibble, 1=high nibble
+        byte_grid = np.broadcast_to(idx, (1, 2, 2, 64)).reshape(1, 8, 32)[0]
+        half_grid = np.broadcast_to(half, (1, 2, 2, 64)).reshape(1, 8, 32)[0]
+        byte_flat = byte_grid.reshape(-1)   # (256,)
+        half_flat = half_grid.reshape(-1)   # (256,) 0->shift0, 1->shift4
+        ql_map = [(int(byte_flat[s]), 0 if half_flat[s] == 0 else 4) for s in range(QK_K)]
+
+        # qh: bytes in [0,64), each contributes to four outputs via >>[0,2,4,6].
+        idxh = np.arange(64, dtype=np.int32).reshape(1, -1, 1, 32)
+        quarter = np.array([0, 1, 2, 3], dtype=np.int32).reshape(1, 1, 4, 1)
+        byte_gridh = np.broadcast_to(idxh, (1, 2, 4, 32)).reshape(1, 8, 32)[0]
+        quarter_gridh = np.broadcast_to(quarter, (1, 2, 4, 32)).reshape(1, 8, 32)[0]
+        byte_flath = byte_gridh.reshape(-1)
+        quarter_flath = quarter_gridh.reshape(-1)
+        qh_map = [(int(byte_flath[s]), int(quarter_flath[s]) * 2) for s in range(QK_K)]
+
+        cls._ql_map_cache = ql_map
+        cls._qh_map_cache = qh_map
+        return ql_map, qh_map
+
+    @classmethod
     def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
         n_blocks = blocks.shape[0]
 
