@@ -398,6 +398,65 @@ void dequantize_row_q1_0(const block_q1_0 * GGML_RESTRICT x, float * GGML_RESTRI
     }
 }
 
+// ===== GSQ2 (2-bit uniform symmetric, group_size=128) =====
+// codebook {-2,-1,0,1}; stored as unsigned 2-bit codes {0,1,2,3} = value+2.
+// dequant: w = (code - 2) * d
+void quantize_row_gsq2_ref(const float * GGML_RESTRICT x, block_gsq2 * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_GSQ2;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        float amax = 0.0f;
+        for (int j = 0; j < qk; j++) {
+            const float v = x[i*qk + j];
+            if (amax < fabsf(v)) {
+                amax = fabsf(v);
+            }
+        }
+
+        // scale so that {-2,-1,0,1} * d covers [-2d, 2d]; use d = amax / 2.
+        const float d  = amax / 2.0f;
+        const float id = d ? 1.0f/d : 0.0f;
+
+        y[i].d = GGML_FP32_TO_FP16(d);
+
+        for (int j = 0; j < qk/4; ++j) {
+            uint8_t b = 0;
+            for (int b4 = 0; b4 < 4; ++b4) {
+                const float v = x[i*qk + 4*j + b4] * id;
+                int q = (int) roundf(v);          // nearest of {-2,-1,0,1}
+                if (q < -2) q = -2;
+                if (q >  1) q =  1;
+                const uint8_t code = (uint8_t)(q + 2);   // {0,1,2,3}
+                b |= code << (2*b4);                // LSB-first
+            }
+            y[i].qs[j] = b;
+        }
+    }
+}
+
+void dequantize_row_gsq2(const block_gsq2 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_GSQ2;
+
+    assert(k % qk == 0);
+
+    const int nb = k / qk;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        for (int j = 0; j < qk; ++j) {
+            const int byte_index = j / 4;
+            const int bit_offset = (j % 4) * 2;
+            const uint8_t code = (x[i].qs[byte_index] >> bit_offset) & 0x3;
+            y[i*qk + j] = ((int)code - 2) * d;
+        }
+    }
+}
+
 void dequantize_row_q4_0(const block_q4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     static const int qk = QK4_0;
 
@@ -2046,6 +2105,21 @@ size_t quantize_q1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, 
     char * qrow = (char *)dst;
     for (int64_t row = 0; row < nrow; ++row) {
         quantize_row_q1_0_ref(src, (block_q1_0*)qrow, n_per_row);
+        src += n_per_row;
+        qrow += row_size;
+    }
+    return nrow * row_size;
+}
+
+size_t quantize_gsq2(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    if (!quant_weights) {
+        quantize_row_gsq2_ref(src, dst, (int64_t)nrow*n_per_row);
+        return nrow * ggml_row_size(GGML_TYPE_GSQ2, n_per_row);
+    }
+    size_t row_size = ggml_row_size(GGML_TYPE_GSQ2, n_per_row);
+    char * qrow = (char *)dst;
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_gsq2_ref(src, (block_gsq2*)qrow, n_per_row);
         src += n_per_row;
         qrow += row_size;
     }
@@ -5460,6 +5534,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q1_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q1_0, data, nb);
+            } break;
+        case GGML_TYPE_GSQ2:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_gsq2, data, nb);
             } break;
         case GGML_TYPE_Q4_0:
             {

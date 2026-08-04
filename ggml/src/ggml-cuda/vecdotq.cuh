@@ -717,6 +717,61 @@ static __device__ __forceinline__ float vec_dot_q1_0_q8_1(
     return d1 * d8 * sumi;
 }
 
+#define VDR_GSQ2_Q8_1_MMVQ 2
+#define VDR_GSQ2_Q8_1_MMQ  4
+
+// GSQ2: 128 elements (32 bytes, 4 codes/byte) with ONE scale, codebook {-2,-1,0,1}.
+// Q8_1: 32 elements per block. iqs selects which of the 4 chunks of 32 to process (0-3).
+static __device__ __forceinline__ float vec_dot_gsq2_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_gsq2 * bgsq2 = (const block_gsq2 *) vbq + kbx;
+
+    const float d1 = bgsq2->d;
+
+    // mmvq passes iqs as an int32 index within the block, stepping by VDR (=2):
+    // a GSQ2 block (128 vals) spans 4 Q8_1 chunks; each chunk = 8 qs bytes = 2 int32.
+    // iqs in {0,2,4,6} -> chunk in {0,1,2,3}.
+    const int chunk = iqs / 2;
+    const block_q8_1 * bq8_1_chunk = bq8_1 + chunk;
+
+    // Load 8 bytes (64 bits) = 32 x 2-bit codes for this chunk
+    const int offset = chunk * 8;
+    const int v0 = bgsq2->qs[offset + 0] | (bgsq2->qs[offset + 1] << 8) |
+                   (bgsq2->qs[offset + 2] << 16) | (bgsq2->qs[offset + 3] << 24);
+    const int v1 = bgsq2->qs[offset + 4] | (bgsq2->qs[offset + 5] << 8) |
+                   (bgsq2->qs[offset + 6] << 16) | (bgsq2->qs[offset + 7] << 24);
+
+    // Unpack 32 x 2-bit codes into 8 ints (4 signed codes each), value = code - 2 in {-2,-1,0,1}.
+    // -2 -> 0xFE, -1 -> 0xFF, 0 -> 0x00, 1 -> 0x01
+    int vi_bytes[8];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int shift0 = j * 8;
+        const int shift1 = j * 8;
+        const int c0 = (v0 >> (shift0 + 0)) & 0x3;
+        const int c1 = (v0 >> (shift0 + 2)) & 0x3;
+        const int c2 = (v0 >> (shift0 + 4)) & 0x3;
+        const int c3 = (v0 >> (shift0 + 6)) & 0x3;
+        vi_bytes[j] = ((c0 - 2) & 0xFF) | (((c1 - 2) & 0xFF) << 8) | (((c2 - 2) & 0xFF) << 16) | (((c3 - 2) & 0xFF) << 24);
+        const int d0 = (v1 >> (shift1 + 0)) & 0x3;
+        const int d1c = (v1 >> (shift1 + 2)) & 0x3;
+        const int d2 = (v1 >> (shift1 + 4)) & 0x3;
+        const int d3 = (v1 >> (shift1 + 6)) & 0x3;
+        vi_bytes[j + 4] = ((d0 - 2) & 0xFF) | (((d1c - 2) & 0xFF) << 8) | (((d2 - 2) & 0xFF) << 16) | (((d3 - 2) & 0xFF) << 24);
+    }
+
+    int sumi = 0;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int u = get_int_b4(bq8_1_chunk->qs, j);
+        sumi = ggml_cuda_dp4a(vi_bytes[j], u, sumi);
+    }
+
+    const float d8 = __low2float(bq8_1_chunk->ds);
+    return d1 * d8 * sumi;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 

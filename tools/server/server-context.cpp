@@ -20,7 +20,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
+#include <cmath>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <filesystem>
 #include <utility>
@@ -51,7 +53,16 @@ static uint32_t server_n_outputs_max(const common_params & params) {
 
     const uint64_t n_outputs = (uint64_t) params.n_parallel * n_outputs_per_seq;
 
-    return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
+    // The legacy /v1/completions `echo` feature computes per-token prompt
+    // logprobs via a prefill pass that requests logits at every prompt
+    // position (a full batch of outputs). Reserve enough output capacity for
+    // a full batch so `echo` requests do not trip the
+    // `n_outputs_max <= cparams.n_outputs_max` assertion in output_reserve().
+    // This grows the logits buffer to n_batch * n_vocab floats (acceptable on
+    // large-GPU deployments); normal generation still only uses n_parallel
+    // outputs per batch.
+    (void) n_outputs;
+    return n_batch;
 }
 
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
@@ -202,6 +213,10 @@ struct server_slot {
 
     std::vector<completion_token_output> generated_token_probs;
 
+    // echo support: cached prompt text and per-token prompt logprobs
+    std::string prompt_text;
+    std::vector<completion_token_output> prompt_token_probs;
+
     bool has_next_token = true;
     bool has_new_line   = false;
     bool truncated      = false;
@@ -317,6 +332,8 @@ struct server_slot {
         }
         generated_tokens.clear();
         generated_token_probs.clear();
+        prompt_text = "";
+        prompt_token_probs.clear();
         json_schema = json();
 
         // clear speculative decoding stats
@@ -1809,6 +1826,161 @@ private:
             return false;
         }
 
+        // echo: capture the prompt text and (if logprobs requested) per-token
+        // prompt logprobs via a separate prefill pass. Read `echo` from the
+        // task before it is moved into slot.task below.
+        const bool echo = task.params.chat_parser_params.echo;
+        if (echo) {
+            slot.prompt_text = task.tokens.detokenize(ctx_tgt, true);
+
+            const int32_t n_probs = task.params.sampling.n_probs;
+            const auto & prompt_toks = task.tokens.get_tokens();
+            const size_t n_prompt = prompt_toks.size();
+
+            if (n_probs > 0 && n_prompt > 1 && slot.prompt_token_probs.empty()) {
+                slot.prompt_token_probs.reserve(n_prompt);
+
+                // Separate prefill pass: decode the prompt with output logits
+                // at every position, then read logits to compute per-token
+                // logprobs. We decode on seq_id == slot.id (the slot's own
+                // sequence, which is about to be prefilled anyway) and read
+                // the logits eagerly into a local buffer.
+                //
+                // CONCURRENCY: clear only THIS slot's KV via
+                // llama_memory_seq_rm(slot.id, -1, -1) rather than the global
+                // llama_memory_clear(data=true), which wiped every other slot's
+                // cached KV and tripped the `pos_min == -1` assertion in
+                // pre_decode under -np N. A throwaway seq_id like 1000000 does
+                // NOT work: KV cells index seq state in a fixed-size array of
+                // LLAMA_MAX_SEQ (256) entries, so seq_id >= 256 is out of bounds
+                // and silently corrupts memory (the earlier throwaway-seq
+                // attempt produced all-null prompt logprobs for this reason).
+                // slot.id is always in [0, n_parallel) < 256, so it is a safe
+                // seq to decode on. The subsequent normal prefill calls
+                // common_context_seq_rm(ctx_tgt, slot.id, 0, -1) (pos_next()==0
+                // since slot.prompt.tokens is empty here), so it erases this
+                // echo pass's KV before re-decoding the prompt for generation.
+                // This whole pass runs on the single server_loop thread
+                // (server_queue::start_loop), so there is no concurrent decode
+                // hazard between echo passes of different slots.
+                GGML_ASSERT((uint32_t) slot.id < llama_n_seq_max(ctx_tgt));
+                llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, -1, -1);
+
+                const int n_batch   = llama_n_batch(ctx_tgt);
+                const int n_vocab   = llama_vocab_n_tokens(vocab);
+                const int num_batch = (int(n_prompt) + n_batch - 1) / n_batch;
+
+                // Always accumulate logits into a local buffer right after each
+                // decode. Each token's logprob is computed from the logits of
+                // the PREVIOUS position, so we keep all of them.
+                std::vector<float> all_logits;
+                all_logits.reserve(n_prompt * n_vocab);
+
+                bool decode_ok = true;
+                for (int batch_idx = 0; batch_idx < num_batch; ++batch_idx) {
+                    const int batch_start = batch_idx * n_batch;
+                    const int batch_size  = std::min(int(n_prompt) - batch_start, n_batch);
+
+                    llama_batch batch = llama_batch_init(batch_size, 0, 1);
+                    for (int i = 0; i < batch_size; ++i) {
+                        common_batch_add(batch, prompt_toks[batch_start + i], batch_start + i, {slot.id}, true);
+                    }
+
+                    const int ret = llama_decode(ctx_tgt, batch);
+                    if (ret == 0) {
+                        const float * batch_logits = llama_get_logits(ctx_tgt);
+                        all_logits.insert(all_logits.end(), batch_logits, batch_logits + batch_size * n_vocab);
+                    } else {
+                        SLT_ERR(slot, "echo prefill pass failed at batch %d (ret = %d)\n", batch_idx, ret);
+                        decode_ok = false;
+                        llama_batch_free(batch);
+                        break;
+                    }
+                    llama_batch_free(batch);
+                }
+
+                if (!decode_ok) {
+                    // fall back: mark all prompt tokens as null logprob
+                    for (size_t i = 0; i < n_prompt; ++i) {
+                        completion_token_output ptok;
+                        ptok.tok          = prompt_toks[i];
+                        ptok.text_to_send = common_token_to_piece(ctx_tgt, prompt_toks[i], true);
+                        ptok.prob = -std::numeric_limits<float>::infinity();
+                        slot.prompt_token_probs.push_back(std::move(ptok));
+                    }
+                } else {
+                for (size_t i = 0; i < n_prompt; ++i) {
+                    completion_token_output ptok;
+                    ptok.tok          = prompt_toks[i];
+                    ptok.text_to_send = common_token_to_piece(ctx_tgt, prompt_toks[i], true);
+
+                    if (i == 0) {
+                        // first prompt token has no conditioning context
+                        ptok.prob = -std::numeric_limits<float>::infinity();
+                    } else {
+                        const float * logits = all_logits.data() + (i - 1) * n_vocab;
+
+                        if (logits != nullptr) {
+                            float max_logit = logits[0];
+                            for (int j = 1; j < n_vocab; ++j) {
+                                max_logit = std::max(max_logit, logits[j]);
+                            }
+                            double sum_exp = 0.0;
+                            for (int j = 0; j < n_vocab; ++j) {
+                                sum_exp += std::exp(logits[j] - max_logit);
+                            }
+                            const float log_sum_exp = max_logit + std::log(sum_exp);
+                            // store as a PROBABILITY (exp(logit - logsumexp), in
+                            // [0,1]) to match get_token_probabilities()/populate_token_probs;
+                            // oaicompat_probs_vector_to_json applies log() to
+                            // turn it into a logprob. (Storing a logprob here would
+                            // be log()'d twice and yield null.)
+                            ptok.prob = std::exp(logits[prompt_toks[i]] - log_sum_exp);
+
+                            if (n_probs > 0) {
+                                std::vector<std::pair<float, llama_token>> logits_id;
+                                logits_id.reserve(n_vocab);
+                                for (int j = 0; j < n_vocab; ++j) {
+                                    logits_id.emplace_back(logits[j] - log_sum_exp, j);
+                                }
+                                std::partial_sort(
+                                    logits_id.begin(),
+                                    logits_id.begin() + std::min((size_t) n_probs, logits_id.size()),
+                                    logits_id.end(),
+                                    [](const auto & a, const auto & b) { return a.first > b.first; });
+
+                                ptok.probs.clear();
+                                const size_t top_k = std::min(logits_id.size(), (size_t) n_probs);
+                                for (size_t k = 0; k < top_k; ++k) {
+                                    completion_token_output::prob_info info;
+                                    info.tok  = logits_id[k].second;
+                                    // store probability (not logprob) for consistency
+                                    info.prob = std::exp(logits_id[k].first);
+                                    info.txt  = common_token_to_piece(ctx_tgt, logits_id[k].second, true);
+                                    ptok.probs.push_back(info);
+                                }
+                            }
+                        } else {
+                            ptok.prob = -std::numeric_limits<float>::infinity();
+                        }
+                    }
+
+                    slot.prompt_token_probs.push_back(std::move(ptok));
+                }
+                } // end decode_ok
+            } else {
+                // no logprobs requested: still echo the prompt tokens (with null
+                // logprobs) so the token list is complete
+                for (size_t i = 0; i < task.tokens.size(); ++i) {
+                    completion_token_output ptok;
+                    ptok.tok          = task.tokens.get_tokens()[i];
+                    ptok.text_to_send = common_token_to_piece(ctx_tgt, task.tokens.get_tokens()[i], true);
+                    ptok.prob = -std::numeric_limits<float>::infinity();
+                    slot.prompt_token_probs.push_back(std::move(ptok));
+                }
+            }
+        }
+
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
 
         // initialize samplers
@@ -2111,6 +2283,11 @@ private:
         res->oaicompat_model   = slot.task->params.oaicompat_model;
         res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
 
+        // echo (streaming): first chunk prepends the echoed prompt text
+        res->echo          = slot.task->params.chat_parser_params.echo;
+        res->prompt_text   = slot.prompt_text;
+        res->is_first_chunk = (slot.n_decoded == 1);
+
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
             res->prob_output = tkn; // copy the token probs
@@ -2146,7 +2323,10 @@ private:
             res->tokens      = std::move(slot.generated_tokens);
         }
         res->timings         = slot.get_timings();
-        res->prompt          = slot.task->tokens.detokenize(ctx_tgt, true);
+        res->echo            = slot.task->params.chat_parser_params.echo;
+        res->prompt          = slot.task->params.chat_parser_params.echo
+                               ? slot.prompt_text
+                               : slot.task->tokens.detokenize(ctx_tgt, true);
         res->response_fields = std::move(slot.task->params.response_fields);
 
         res->truncated             = slot.truncated;
@@ -2179,6 +2359,11 @@ private:
                 res->probs_output = std::vector<completion_token_output>(
                         slot.generated_token_probs.begin(),
                         slot.generated_token_probs.end());
+            }
+
+            // echo: prepend prompt token logprobs captured at launch time
+            if (slot.task->params.chat_parser_params.echo && !slot.prompt_token_probs.empty()) {
+                res->prompt_probs_output = slot.prompt_token_probs;
             }
         }
 

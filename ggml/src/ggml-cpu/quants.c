@@ -26,6 +26,10 @@ void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q1_0_ref(x, y, k);
 }
 
+void quantize_row_gsq2(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
+    quantize_row_gsq2_ref(x, y, k);
+}
+
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
 }
@@ -159,6 +163,56 @@ void ggml_vec_dot_q1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
                            +  ((mask & 0x20) ? qy[5] : -qy[5])
                            +  ((mask & 0x40) ? qy[6] : -qy[6])
                            +  ((mask & 0x80) ? qy[7] : -qy[7]);
+            }
+
+            sumi += d1 * sumi_block;
+        }
+
+        sumf += d0 * sumi;
+    }
+
+    *s = sumf;
+}
+
+
+// GSQ2 (block=128) x Q8_0 (block=32): one GSQ2 block maps to 4 Q8_0 blocks.
+// codebook {-2,-1,0,1}, stored code = value+2 in {0,1,2,3}.
+void ggml_vec_dot_gsq2_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK_GSQ2;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_gsq2 * GGML_RESTRICT x = vx;
+    const block_q8_0  * GGML_RESTRICT y = vy;
+
+    float sumf = 0.0;
+
+    for (int i = 0; i < nb; i++) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        float sumi = 0.0f;
+
+        for (int k = 0; k < 4; k++) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
+            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+            int sumi_block = 0;
+
+            // 32 GSQ2 values = 8 bytes; each Q8_0 block has 32 int8 q values.
+            const uint8_t * GGML_RESTRICT codes = &x[i].qs[k * 8];
+            const int8_t  * GGML_RESTRICT qy   = yb->qs;
+
+            for (int b = 0; b < 8; ++b, qy += 4) {
+                const uint8_t byte = codes[b];
+                sumi_block += (((int)((byte     ) & 0x3) - 2) * qy[0])
+                           +  (((int)((byte >> 2) & 0x3) - 2) * qy[1])
+                           +  (((int)((byte >> 4) & 0x3) - 2) * qy[2])
+                           +  (((int)((byte >> 6) & 0x3) - 2) * qy[3]);
             }
 
             sumi += d1 * sumi_block;

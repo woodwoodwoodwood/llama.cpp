@@ -214,6 +214,11 @@ if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(pocs)
 endif()
 
+# kernel micro-benchmark (GSQ2 vs Q2_K dequant/mmvq/mmq)
+if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
+    add_subdirectory(testing)
+endif()
+
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS)
     add_subdirectory(tools)
 endif()
