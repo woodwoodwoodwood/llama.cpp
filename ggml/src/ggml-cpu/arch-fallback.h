@@ -109,7 +109,6 @@
 #define ggml_gemm_mxfp4_4x4_q8_0_generic ggml_gemm_mxfp4_4x4_q8_0
 #define ggml_gemm_q8_0_4x4_q8_0_generic ggml_gemm_q8_0_4x4_q8_0
 #define ggml_gemm_q8_0_4x8_q8_0_generic ggml_gemm_q8_0_4x8_q8_0
-#define ggml_vec_dot_gsq2_q8_0_generic ggml_vec_dot_gsq2_q8_0
 #elif defined(__POWERPC__) || defined(__powerpc__)
 // ref: https://github.com/ggml-org/llama.cpp/pull/14146#issuecomment-2972561679
 // quants.c

@@ -1,0 +1,83 @@
+skill_version: "0.4.1"
+status: done
+complexity: M
+work_type: perf
+subdomain: main
+cross_subdomains: []
+
+source:
+  type: conversation
+  id: ""
+  url: ""
+  workspace_id: ""
+  fetch_status: n/a
+  upload_status: n/a
+
+tapd_sync:
+  last_synced: null
+  action: null
+  entry_type: null
+  entry_id: ""
+  workspace_id: ""
+  fields: []
+  artifact: null
+  skipped: user
+
+execution_env:
+  coding:
+    agent: codebuddy
+    last_active: "2026-08-19T19:37:00+08:00"
+  container:
+    agent: codebuddy-verify
+    last_run: "2026-08-19T19:51:00+08:00"
+
+models:
+  review: opus
+
+handoff:
+  pending: false
+  manifest: 2-handoff-manifest.json
+  produced_at: "2026-08-18T17:10:00+08:00"
+  produced_by_commit: "d6ab3cd2d762cfa886a9b775a04d665ddee756f3"
+  consumed_at: "2026-08-19T19:51:00+08:00"
+  consumed_by_commit: "d6ab3cd2d762cfa886a9b775a04d665ddee756f3"
+
+verify_attempts: 0
+max_retries: 3
+
+artifacts:
+  clarification:      {produced_at: "2026-08-18T16:23:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  context-snapshot:    {produced_at: "2026-08-18T16:55:00+08:00", stale: false, revision: 3, produced_by_env: coding, updated_by_stages: [clarify, design]}
+  change-plan:         {produced_at: "2026-08-18T16:55:00+08:00", stale: false, revision: 2, produced_by_env: coding}
+  coding-snapshot:      {produced_at: "2026-08-18T17:10:00+08:00", stale: false, revision: 2, produced_by_env: coding}
+  verify-report:
+    compile:     {produced_at: "2026-08-19T19:51:00+08:00", stale: false, revision: 2, produced_by_env: container, result: pass}
+    unit:        {produced_at: "2026-08-19T19:51:00+08:00", stale: false, revision: 2, produced_by_env: container, result: pass}
+    integration: {produced_at: "2026-08-19T19:51:00+08:00", stale: false, revision: 2, produced_by_env: container, result: not_run}
+  reviews:
+    - {produced_at: "2026-08-18T18:05:00+08:00", stale: false, revision: 1, filename: "4-reviews/20260818-1805-go_only.md", mode: go_only, model: opus}
+    - {produced_at: "2026-08-19T19:37:00+08:00", stale: false, revision: 2, filename: "4-reviews/20260819-1937-go_only.md", mode: go_only, model: codebuddy-glm-5.3, note: "fix 确认轮（F6）；模型偏离 models.review=opus，已在报告标注"}
+    - {produced_at: "2026-08-19T19:53:00+08:00", stale: false, revision: 3, filename: "4-reviews/20260819-1953-verify_informed.md", mode: verify_informed, model: codebuddy-glm-5.3, note: "基于 verify-report r2；模型偏离同上"}
+
+knowledge_base_feedback:
+  status: done
+  proposal_count: 4
+  applied_at: "2026-08-19T20:01:00+08:00"
+
+status_history:
+  - {status: draft, at: "2026-08-18T16:23:00+08:00", by: /ai-clarify, env: coding, reason: "oral perf clarify; subdomain main initialized"}
+  - {status: designing, at: "2026-08-18T16:28:00+08:00", by: /ai-design, env: coding, reason: "project AVX2/VNNI GSQ2 vec_dot onto two files"}
+  - {status: pending_verification, at: "2026-08-18T16:31:00+08:00", by: /ai-go, env: coding, reason: "snapshot existing 9faf2bdd7; no extra code changes"}
+  - {status: verifying, at: "2026-08-18T16:43:00+08:00", by: /ai-verify, env: container, reason: "compile pass; unit vacuous pass; integration not_run"}
+  - {status: designing, at: "2026-08-18T16:55:00+08:00", by: /ai-design --redo, env: coding, reason: "add GSQ2 vec_dot unit test to §B"}
+  - {status: developing, at: "2026-08-18T17:00:00+08:00", by: /ai-go --redo, env: coding, reason: "implement test-gsq2-vec-dot"}
+  - {status: pending_verification, at: "2026-08-18T17:10:00+08:00", by: /ai-go --redo, env: coding, reason: "GSQ2 unit test added; handoff pending"}
+  - {status: pending_verification, at: "2026-08-18T18:05:00+08:00", by: /ai-review --mode=go_only, env: coding, reason: "review commit 7b296cf4a; status unchanged"}
+  - {status: verifying, at: "2026-08-19T19:51:00+08:00", by: /ai-verify, env: container, reason: "commit d6ab3cd2d clean-tree compile pass; unit 5/5 pass on alderlake AVX2; integration not_run (manual)"}
+  - {status: reviewing, at: "2026-08-19T19:53:00+08:00", by: /ai-review --mode=verify_informed, env: coding, reason: "verify r2 consumed; FIX-1~4 root-cause confirmed; integration/perf-target unconfirmed (forced notice)"}
+  - {status: done, at: "2026-08-19T20:01:00+08:00", by: /ai-reflect, env: coding, reason: "4 knowledge proposals confirmed & written to ai_docs/ (first docs in repo); workflow complete"}
+
+skipped_phases: []
+paused_from: null
+blocked_reason: null
+blocked_at: null

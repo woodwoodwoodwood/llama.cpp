@@ -240,6 +240,8 @@ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
 endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
+# GSQ2 CPU vec_dot vs generic. Uses backend registry (works with GGML_BACKEND_DL=ON).
+llama_build_and_test(test-gsq2-vec-dot.cpp)
 
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
