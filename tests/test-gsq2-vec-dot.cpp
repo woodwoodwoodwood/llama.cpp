@@ -323,6 +323,145 @@ static int test_mul_mat_matches_generic(int64_t m, int64_t n, int64_t k, float o
     return failed;
 }
 
+// mul_mat_id (MoE path) goes through the same wdata activation conversion in
+// ggml-cpu.c, but a different chunk loop than plain mul_mat — exercise it with
+// multiple experts and tokens. b -> [k, n_expert_used, n_tokens]; ids ->
+// [n_expert_used, n_tokens]; c -> [rows, n_expert_used, n_tokens].
+static bool run_cpu_mul_mat_id_gsq2(
+        int64_t m, int64_t k, int n_as, int n_tok,
+        const void * a_data, size_t a_bytes,
+        const float * b_data, size_t b_bytes,
+        const int32_t * ids_data, size_t ids_bytes,
+        float * out, size_t out_bytes,
+        std::string & err) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (!backend) {
+        err = "no CPU backend (ggml_backend_load_all / GGML_BACKEND_DL)";
+        return false;
+    }
+
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ 16 * 1024 * 1024,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        err = "ggml_init failed";
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    ggml_tensor * a   = ggml_new_tensor_3d(ctx, GGML_TYPE_GSQ2, k, m, n_as);
+    ggml_tensor * b   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, 1, n_tok);
+    ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 1, n_tok);
+    ggml_tensor * c   = ggml_mul_mat_id(ctx, a, b, ids);
+
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, c);
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buf) {
+        err = "ggml_backend_alloc_ctx_tensors failed";
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    ggml_backend_tensor_set(a, a_data, 0, a_bytes);
+    ggml_backend_tensor_set(b, b_data, 0, b_bytes);
+    ggml_backend_tensor_set(ids, ids_data, 0, ids_bytes);
+
+    const enum ggml_status status = ggml_backend_graph_compute(backend, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        err = std::string("ggml_backend_graph_compute: ") + ggml_status_to_string(status);
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return false;
+    }
+
+    ggml_backend_tensor_get(c, out, 0, out_bytes);
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+    return true;
+}
+
+static int test_mul_mat_id_matches_generic(int64_t m, int64_t k, int n_as, int n_tok, float offset, bool verbose) {
+    const auto * gsq2 = ggml_get_type_traits(GGML_TYPE_GSQ2);
+    if (!gsq2 || !gsq2->from_float_ref) {
+        printf("mul_mat_id GSQ2 m=%lld k=%lld:       FAILED (quantize ref missing)\n",
+               (long long) m, (long long) k);
+        return 1;
+    }
+
+    const size_t a_bytes  = (size_t) n_as * m * ggml_row_size(GGML_TYPE_GSQ2, k);
+    const size_t b_bytes  = (size_t) n_tok * ggml_row_size(GGML_TYPE_F32, k);
+    const size_t q_bytes  = ggml_row_size(GGML_TYPE_Q8_0, k);
+    const size_t out_bytes = (size_t) n_tok * m * sizeof(float);
+
+    std::vector<float>   wf((size_t) n_as * m * k);
+    std::vector<float>   xf((size_t) n_tok * k);
+    std::vector<uint8_t> a_q(a_bytes);
+    std::vector<uint8_t> b_q((size_t) n_tok * q_bytes);
+    std::vector<int32_t> idv(n_tok);
+    std::vector<float>   got(out_bytes / sizeof(float), 0.0f);
+
+    for (int a = 0; a < n_as; a++) {
+        for (int i = 0; i < m; i++) {
+            generate_data(offset + a * 7.0f + (float) i, (size_t) k, wf.data() + ((size_t) a * m + i) * k);
+            gsq2->from_float_ref(wf.data() + ((size_t) a * m + i) * k,
+                                 a_q.data() + ((size_t) a * m + i) * ggml_row_size(GGML_TYPE_GSQ2, k), k);
+        }
+    }
+    for (int t = 0; t < n_tok; t++) {
+        generate_data(offset + 100.0f + (float) t, (size_t) k, xf.data() + (size_t) t * k);
+        std::string qerr;
+        if (!quantize_q8_0_cpu(xf.data() + (size_t) t * k, k,
+                               b_q.data() + (size_t) t * q_bytes, q_bytes, qerr)) {
+            printf("mul_mat_id GSQ2 m=%lld k=%lld:       FAILED (Q8 CPU quant: %s)\n",
+                   (long long) m, (long long) k, qerr.c_str());
+            return 1;
+        }
+    }
+    for (int t = 0; t < n_tok; t++) {
+        idv[t] = t % n_as; // round-robin expert routing
+    }
+
+    std::string err;
+    if (!run_cpu_mul_mat_id_gsq2(m, k, n_as, n_tok,
+                                 a_q.data(), a_bytes,
+                                 xf.data(), b_bytes,
+                                 idv.data(), idv.size() * sizeof(int32_t),
+                                 got.data(), out_bytes, err)) {
+        printf("mul_mat_id GSQ2 m=%lld k=%lld:       FAILED (%s)\n",
+               (long long) m, (long long) k, err.c_str());
+        return 1;
+    }
+
+    int failed = 0;
+    for (int t = 0; t < n_tok && !failed; t++) {
+        const int a = idv[t];
+        for (int i = 0; i < m; i++) {
+            const void * xrow = a_q.data() + ((size_t) a * m + i) * ggml_row_size(GGML_TYPE_GSQ2, k);
+            const void * ycol = b_q.data() + (size_t) t * q_bytes;
+            const float  ref  = vec_dot_gsq2_q8_0_ref((int) k, xrow, ycol);
+            const float  out  = got[(size_t) t * m + i];
+            if (!almost_equal(out, ref, 1e-4f, 1e-5f)) {
+                failed = 1;
+                printf("mul_mat_id GSQ2 m=%lld k=%lld:       FAILED (t=%d a=%d i=%lld got=%f ref=%f)\n",
+                       (long long) m, (long long) k, t, a, (long long) i, out, ref);
+                break;
+            }
+        }
+    }
+
+    printf("mul_mat_id GSQ2 m=%lld n_as=%d k=%lld:    %s\n",
+           (long long) m, n_as, (long long) k, failed ? "FAILED" : "ok");
+    return failed;
+}
+
 static int test_pack_e4_mul_mat(bool verbose) {
     const int64_t k = QK_GSQ2_TEST;
     const int64_t m = 1;
@@ -387,6 +526,7 @@ int main(int argc, char ** argv) {
         num_failed += test_mul_mat_matches_generic(1, 1, 128, 0.0f, verbose);
         num_failed += test_mul_mat_matches_generic(8, 1, 128, 1.0f, verbose);
         num_failed += test_mul_mat_matches_generic(4, 3, 256, 2.0f, verbose);
+        num_failed += test_mul_mat_id_matches_generic(8, 256, 2, 3, 3.0f, verbose);
     }
 
     if (num_failed || verbose) {

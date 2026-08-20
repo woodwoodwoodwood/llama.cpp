@@ -95,26 +95,6 @@ static inline __m256i bytes_from_nibbles_32(const uint8_t * rsi)
     return _mm256_and_si256(lowMask, bytes);
 }
 
-// Unpack 32 LSB-first 2-bit codes (8 bytes) into 32 bytes in {0,1,2,3}.
-// Byte layout matches ggml_vec_dot_gsq2_q8_0_generic: bits [1:0]=c0, [3:2]=c1, [5:4]=c2, [7:6]=c3.
-static inline __m256i bytes_from_2bit_32(const uint8_t * rsi)
-{
-    // qs sits at offset 2 in block_gsq2 (2-byte aligned). Avoid _mm_loadl_epi64.
-    uint64_t packed;
-    memcpy(&packed, rsi, sizeof(packed));
-    const __m128i raw = _mm_cvtsi64_si128((int64_t) packed);
-    const __m256i bytes32 = _mm256_cvtepu8_epi32(raw);
-    const __m256i mask = _mm256_set1_epi32(0x03);
-    const __m256i c0 = _mm256_and_si256(bytes32, mask);
-    const __m256i c1 = _mm256_and_si256(_mm256_srli_epi32(bytes32, 2), mask);
-    const __m256i c2 = _mm256_and_si256(_mm256_srli_epi32(bytes32, 4), mask);
-    const __m256i c3 = _mm256_and_si256(_mm256_srli_epi32(bytes32, 6), mask);
-    return _mm256_or_si256(c0,
-           _mm256_or_si256(_mm256_slli_epi32(c1, 8),
-           _mm256_or_si256(_mm256_slli_epi32(c2, 16),
-                           _mm256_slli_epi32(c3, 24))));
-}
-
 // add int16_t pairwise and return as float vector
 static inline __m256 sum_i16_pairs_float(const __m256i x) {
     const __m256i ones = _mm256_set1_epi16(1);
@@ -718,8 +698,23 @@ void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
-// GSQ2 (block=128) x Q8_0 (block=32): one GSQ2 block maps to 4 Q8_0 blocks.
-// codebook w = (code - 2) * d, code in {0,1,2,3}. AVX2 unpack + VNNI/maddubs via mul_sum_i8_pairs_float.
+// GSQ2 (block=128) wide-unpack kernel: the activation arrives prepermuted by
+// ggml_quantize_row_gsq2_act (block_gsq2_act). All 128 codes are extracted with
+// 3 shifts + 4 ANDs (~8 instructions per block) instead of the narrow
+// per-8-byte unpack (~60 instructions per block), and the (code - 2) codebook
+// offset is a precomputed per-lane correction: 4 dpbusd + 1 fmadd per block on
+// VNNI hardware.
+static inline __m256i gsq2_dpbusd_epi32(__m256i acc, __m256i u, __m256i s) {
+#if defined(__AVX512VNNI__) && defined(__AVX512VL__)
+    return _mm256_dpbusd_epi32(acc, u, s);
+#elif defined(__AVXVNNI__)
+    return _mm256_dpbusd_avx_epi32(acc, u, s);
+#else
+    // u in [0,3] unsigned, s in [-127,127]: pairwise products fit in int16
+    return _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_maddubs_epi16(u, s)));
+#endif
+}
+
 void ggml_vec_dot_gsq2_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK_GSQ2;
     const int nb = n / qk;
@@ -731,27 +726,32 @@ void ggml_vec_dot_gsq2_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     UNUSED(by);
     UNUSED(bs);
 
-    const block_gsq2 * GGML_RESTRICT x = vx;
-    const block_q8_0 * GGML_RESTRICT y = vy;
+    const block_gsq2     * GGML_RESTRICT x = vx;
+    const block_gsq2_act * GGML_RESTRICT y = vy;
 
 #if defined(__AVX2__)
-    const __m256i off = _mm256_set1_epi8(2);
+    const __m256i m3 = _mm256_set1_epi8(0x03);
     __m256 acc = _mm256_setzero_ps();
 
     for (int ib = 0; ib < nb; ++ib) {
-        const float d0 = GGML_CPU_FP16_TO_FP32(x[ib].d);
-        const block_q8_0 * GGML_RESTRICT y_ptr = &y[ib * 4];
-        __m256 acc_block = _mm256_setzero_ps();
+        const __m256i pk = _mm256_loadu_si256((const __m256i *) x[ib].qs);
+        const int8_t * yq = y[ib].qs;
+        const __m256i y0 = _mm256_loadu_si256((const __m256i *) (yq +  0));
+        const __m256i y1 = _mm256_loadu_si256((const __m256i *) (yq + 32));
+        const __m256i y2 = _mm256_loadu_si256((const __m256i *) (yq + 64));
+        const __m256i y3 = _mm256_loadu_si256((const __m256i *) (yq + 96));
 
-        for (int k = 0; k < 4; ++k) {
-            __m256i qx = bytes_from_2bit_32(&x[ib].qs[k * 8]);
-            qx = _mm256_sub_epi8(qx, off);
-            const __m256i qy = _mm256_loadu_si256((const __m256i *) y_ptr[k].qs);
-            const __m256 q = mul_sum_i8_pairs_float(qx, qy);
-            acc_block = _mm256_fmadd_ps(_mm256_set1_ps(GGML_CPU_FP16_TO_FP32(y_ptr[k].d)), q, acc_block);
-        }
+        // code vector ck holds slot k of every packed byte i, i.e. weight 4i+k,
+        // matching yk = activation of weight 4i+k in lane i
+        __m256i sum = gsq2_dpbusd_epi32(_mm256_setzero_si256(), _mm256_and_si256(pk, m3), y0);
+        sum = gsq2_dpbusd_epi32(sum, _mm256_and_si256(_mm256_srli_epi16(pk, 2), m3), y1);
+        sum = gsq2_dpbusd_epi32(sum, _mm256_and_si256(_mm256_srli_epi16(pk, 4), m3), y2);
+        sum = gsq2_dpbusd_epi32(sum, _mm256_and_si256(_mm256_srli_epi16(pk, 6), m3), y3);
 
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0), acc_block, acc);
+        const __m256 ds = _mm256_loadu_ps(y[ib].d);
+        // (sum*ds + corr) * d0, where corr = -2*sum(y)*ds is precomputed
+        const __m256 v = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(sum), ds), _mm256_loadu_ps(y[ib].corr));
+        acc = _mm256_fmadd_ps(_mm256_set1_ps(GGML_CPU_FP16_TO_FP32(x[ib].d)), v, acc);
     }
 
     *s = hsum_float_8(acc);

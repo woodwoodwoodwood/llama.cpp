@@ -8444,6 +8444,11 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
     GGML_ASSERT((                            q_to_vec_dot) && "fattn: unsupported K-type");
     GGML_ASSERT((v->type == GGML_TYPE_F32 || v_to_float  ) && "fattn: unsupported V-type");
+    // GSQ2's vec_dot consumes the permuted block_gsq2_act activation layout prepared by
+    // mul_mat/mul_mat_id; fattn quantizes Q into the plain vec_dot_type layout, which would
+    // be silently misread by the wide kernel. GSQ2 is a weight-only format: reject here.
+    GGML_ASSERT(k->type != GGML_TYPE_GSQ2 && "fattn: GSQ2 K cache not supported");
+    GGML_ASSERT(v->type != GGML_TYPE_GSQ2 && "fattn: GSQ2 V cache not supported");
 
     int ith = params->ith;
 

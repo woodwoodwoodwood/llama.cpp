@@ -1192,8 +1192,11 @@ static void ggml_compute_forward_mul_mat_one_chunk(
         return;
     }
 
-    const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
-    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+    // GSQ2 uses a dedicated permuted activation layout (block_gsq2_act) instead
+    // of the plain vec_dot_type buffer, so it always reads from params->wdata.
+    const bool is_gsq2 = type == GGML_TYPE_GSQ2;
+    const void * wdata = (!is_gsq2 && src1->type == vec_dot_type) ? src1->data : params->wdata;
+    const size_t row_size = is_gsq2 ? ggml_gsq2_act_row_size(ne10) : ggml_row_size(vec_dot_type, ne10);
 
     assert(ne12 % ne02 == 0);
     assert(ne13 % ne03 == 0);
@@ -1273,6 +1276,10 @@ void ggml_compute_forward_mul_mat(
     ggml_from_float_t        const from_float           = type_traits_cpu[vec_dot_type].from_float;
     int64_t                  const vec_dot_num_rows     = type_traits_cpu[src0->type].nrows;
 
+    // GSQ2 converts src1 into the permuted block_gsq2_act layout (see quants.h),
+    // not the plain vec_dot_type buffer.
+    const bool src0_is_gsq2 = src0->type == GGML_TYPE_GSQ2;
+
     GGML_ASSERT(ne0 == ne01);
     GGML_ASSERT(ne1 == ne11);
     GGML_ASSERT(ne2 == ne12);
@@ -1319,11 +1326,11 @@ void ggml_compute_forward_mul_mat(
 UseGgmlGemm1:;
 #endif
 
-    if (src1->type != vec_dot_type) {
+    if (src1->type != vec_dot_type || src0_is_gsq2) {
         char * wdata = params->wdata;
 
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw0 = src0_is_gsq2 ? sizeof(block_gsq2_act) : ggml_type_size(vec_dot_type);
+        const size_t nbw1 = src0_is_gsq2 ? ggml_gsq2_act_row_size(ne10) : ggml_row_size(vec_dot_type, ne10);
         const size_t nbw2 = nbw1*ne11;
         const size_t nbw3 = nbw2*ne12;
 
@@ -1344,12 +1351,19 @@ UseGgmlGemm1:;
         for (int64_t i13 = 0; i13 < ne13; ++i13) {
             for (int64_t i12 = 0; i12 < ne12; ++i12) {
                 for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t bs = ggml_blck_size(vec_dot_type);
+                    size_t bs = src0_is_gsq2 ? ggml_blck_size(GGML_TYPE_GSQ2) : ggml_blck_size(vec_dot_type);
                     int64_t ne10_block_start = (ith * ne10/bs) / nth;
                     int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
+                    if (src0_is_gsq2) {
+                        ggml_quantize_row_gsq2_act(
+                            (float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                            (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                            (ne10_block_end - ne10_block_start) * bs);
+                    } else {
+                        from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                                   (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                                    (ne10_block_end - ne10_block_start) * bs);
+                    }
                 }
             }
         }
@@ -1364,7 +1378,7 @@ UseGgmlGemm1:;
     ggml_barrier(params->threadpool);
 
 #if GGML_USE_LLAMAFILE
-    if (src1->type != vec_dot_type) {
+    if (src1->type != vec_dot_type && !src0_is_gsq2) {
         const void* wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
 
@@ -1551,6 +1565,9 @@ static void ggml_compute_forward_mul_mat_id(
     enum ggml_type    const vec_dot_type    = type_traits_cpu[type].vec_dot_type;
     ggml_from_float_t const from_float      = type_traits_cpu[vec_dot_type].from_float;
 
+    // GSQ2 converts src1 into the permuted block_gsq2_act layout (see quants.h).
+    const bool src0_is_gsq2 = type == GGML_TYPE_GSQ2;
+
     // we don't support permuted src0 or src1
     GGML_ASSERT(nb00 == ggml_type_size(type));
     GGML_ASSERT(nb10 == ggml_type_size(src1->type));
@@ -1567,8 +1584,11 @@ static void ggml_compute_forward_mul_mat_id(
 
     void * wdata_cur = params->wdata;
 
-    if (src1->type != vec_dot_type) {
-        incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
+    if (src1->type != vec_dot_type || src0_is_gsq2) {
+        incr_ptr_aligned(&wdata_cur,
+            src0_is_gsq2 ? ggml_gsq2_act_row_size(ggml_nelements(src1))
+                         : ggml_row_size(vec_dot_type, ggml_nelements(src1)),
+            sizeof(int64_t));
     }
 
     int64_t * matrix_row_counts = // [n_as]
@@ -1582,11 +1602,11 @@ static void ggml_compute_forward_mul_mat_id(
 
     GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
 
-    if (src1->type != vec_dot_type) {
+    if (src1->type != vec_dot_type || src0_is_gsq2) {
         char * wdata = params->wdata;
 
-        const size_t nbw0 = ggml_type_size(vec_dot_type);
-        const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
+        const size_t nbw0 = src0_is_gsq2 ? sizeof(block_gsq2_act) : ggml_type_size(vec_dot_type);
+        const size_t nbw1 = src0_is_gsq2 ? ggml_gsq2_act_row_size(ne10) : ggml_row_size(vec_dot_type, ne10);
         const size_t nbw2 = nbw1*ne11;
         const size_t nbw3 = nbw2*ne12;
 
@@ -1599,7 +1619,7 @@ static void ggml_compute_forward_mul_mat_id(
                 for (int64_t i11 = 0; i11 < ne11; ++i11) {
                     from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
                                (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
-                               ne10);
+                                ne10);
                 }
             }
         }
@@ -1607,12 +1627,19 @@ static void ggml_compute_forward_mul_mat_id(
         for (int64_t i13 = 0; i13 < ne13; ++i13) {
             for (int64_t i12 = 0; i12 < ne12; ++i12) {
                 for (int64_t i11 = 0; i11 < ne11; ++i11) {
-                    size_t bs = ggml_blck_size(vec_dot_type);
+                    size_t bs = src0_is_gsq2 ? ggml_blck_size(GGML_TYPE_GSQ2) : ggml_blck_size(vec_dot_type);
                     int64_t ne10_block_start = (ith * ne10/bs) / nth;
                     int64_t ne10_block_end   = ((ith + 1) * ne10/bs) / nth;
-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
-                               (ne10_block_end - ne10_block_start) * bs);
+                    if (src0_is_gsq2) {
+                        ggml_quantize_row_gsq2_act(
+                            (float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                            (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                            (ne10_block_end - ne10_block_start) * bs);
+                    } else {
+                        from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + ne10_block_start*bs*nb10),
+                                   (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1 + ne10_block_start*nbw0),
+                                    (ne10_block_end - ne10_block_start) * bs);
+                    }
                 }
             }
         }
@@ -1652,8 +1679,9 @@ static void ggml_compute_forward_mul_mat_id(
         }
 
         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
-        const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
-        const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+        // GSQ2 reads the permuted block_gsq2_act buffer, never src1->data directly.
+        const void * wdata = (!src0_is_gsq2 && src1->type == vec_dot_type) ? src1->data : params->wdata;
+        const size_t row_size = src0_is_gsq2 ? ggml_gsq2_act_row_size(ne10) : ggml_row_size(vec_dot_type, ne10);
 
         const int64_t nr0 = ne01;
         const int64_t nr1 = cne1;
@@ -2829,7 +2857,10 @@ struct ggml_cplan ggml_graph_plan(
                     {
                         const enum ggml_type vec_dot_type = type_traits_cpu[node->src[0]->type].vec_dot_type;
 
-                        if (node->src[1]->type != vec_dot_type) {
+                        if (node->src[0]->type == GGML_TYPE_GSQ2) {
+                            // GSQ2 converts src1 into the permuted block_gsq2_act layout
+                            cur = ggml_gsq2_act_row_size(ggml_nelements(node->src[1]));
+                        } else if (node->src[1]->type != vec_dot_type) {
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
                     } break;
@@ -2842,8 +2873,11 @@ struct ggml_cplan ggml_graph_plan(
                         const enum ggml_type vec_dot_type = type_traits_cpu[src0->type].vec_dot_type;
                         const int n_as = src0->ne[2];
                         // src1
-                        if (src1->type != vec_dot_type) {
-                            cur += ggml_row_size(vec_dot_type, ggml_nelements(src1)) + sizeof(int64_t);
+                        if (src1->type != vec_dot_type || src0->type == GGML_TYPE_GSQ2) {
+                            cur += (src0->type == GGML_TYPE_GSQ2
+                                        ? ggml_gsq2_act_row_size(ggml_nelements(src1))
+                                        : ggml_row_size(vec_dot_type, ggml_nelements(src1)))
+                                   + sizeof(int64_t);
                         }
                         // matrix_row_counts
                         cur += n_as * sizeof(int64_t) + sizeof(int64_t);

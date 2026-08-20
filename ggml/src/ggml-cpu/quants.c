@@ -30,6 +30,52 @@ void quantize_row_gsq2(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_gsq2_ref(x, y, k);
 }
 
+size_t ggml_gsq2_act_row_size(int64_t n) {
+    assert(n % QK_GSQ2 == 0);
+    return (size_t)(n / QK_GSQ2) * sizeof(block_gsq2_act);
+}
+
+// Prep an F32 activation row for the GSQ2 wide-unpack kernels: one call per
+// row per token, amortized over every weight row / expert that consumes it.
+// The 128-element slice is quantized with the same dispatched quantize_row_q8_0
+// the plain Q8_0 mul_mat path uses, so the stored bytes are bit-identical;
+// then permuted into dpbusd lane order with per-lane scales and the
+// precomputed (code - 2) correction (see quants.h for the layout contract).
+void ggml_quantize_row_gsq2_act(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_GSQ2 == 0);
+    const int64_t nb = k / QK_GSQ2;
+
+    block_gsq2_act * GGML_RESTRICT y = vy;
+
+    block_q8_0 tmp[4];
+
+    for (int64_t ib = 0; ib < nb; ++ib) {
+        quantize_row_q8_0(x + ib*QK_GSQ2, tmp, QK_GSQ2);
+
+        for (int j = 0; j < 4; ++j) {
+            const float d = GGML_CPU_FP16_TO_FP32(tmp[j].d);
+            y[ib].d[2*j + 0] = d;
+            y[ib].d[2*j + 1] = d;
+        }
+
+        int32_t sumy[8] = {0};
+        for (int kk = 0; kk < 4; ++kk) {
+            for (int i = 0; i < 32; ++i) {
+                const int w  = 4*i + kk; // natural weight index
+                const int qb = w >> 5;   // Q8_0 sub-block
+                const int qi = w & 31;   // index inside the sub-block
+                const int8_t v = tmp[qb].qs[qi];
+                y[ib].qs[kk*32 + i] = v;
+                sumy[i >> 2] += v;       // dpbusd int32 lane i/4
+            }
+        }
+
+        for (int j = 0; j < 8; ++j) {
+            y[ib].corr[j] = -2.0f * (float) sumy[j] * y[ib].d[j];
+        }
+    }
+}
+
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
     quantize_row_q4_0_ref(x, y, k);
 }
@@ -175,8 +221,12 @@ void ggml_vec_dot_q1_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
 }
 
 
-// GSQ2 (block=128) x Q8_0 (block=32): one GSQ2 block maps to 4 Q8_0 blocks.
+// GSQ2 (block=128) x permuted Q8_0 activation (block=32): one GSQ2 block maps
+// to 4 Q8_0 blocks; the activation arrives as block_gsq2_act (see quants.h).
 // codebook {-2,-1,0,1}, stored code = value+2 in {0,1,2,3}.
+// Iterated in natural weight order w: code slot (w & 3) of packed byte (w >> 2),
+// activation value qs[(w & 3)*32 + (w >> 2)] — same grouping and float scaling
+// order as the old plain-Q8_0 generic kernel.
 void ggml_vec_dot_gsq2_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK_GSQ2;
     const int nb = n / qk;
@@ -188,8 +238,8 @@ void ggml_vec_dot_gsq2_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
     UNUSED(by);
     UNUSED(bs);
 
-    const block_gsq2 * GGML_RESTRICT x = vx;
-    const block_q8_0  * GGML_RESTRICT y = vy;
+    const block_gsq2     * GGML_RESTRICT x = vx;
+    const block_gsq2_act * GGML_RESTRICT y = vy;
 
     float sumf = 0.0;
 
@@ -198,21 +248,16 @@ void ggml_vec_dot_gsq2_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
 
         float sumi = 0.0f;
 
-        for (int k = 0; k < 4; k++) {
-            const block_q8_0 * GGML_RESTRICT yb = &y[i * 4 + k];
-            const float d1 = GGML_CPU_FP16_TO_FP32(yb->d);
+        for (int sub = 0; sub < 4; sub++) {
+            const float d1 = y[i].d[2*sub];
             int sumi_block = 0;
 
-            // 32 GSQ2 values = 8 bytes; each Q8_0 block has 32 int8 q values.
-            const uint8_t * GGML_RESTRICT codes = &x[i].qs[k * 8];
-            const int8_t  * GGML_RESTRICT qy   = yb->qs;
-
-            for (int b = 0; b < 8; ++b, qy += 4) {
-                const uint8_t byte = codes[b];
-                sumi_block += (((int)((byte     ) & 0x3) - 2) * qy[0])
-                           +  (((int)((byte >> 2) & 0x3) - 2) * qy[1])
-                           +  (((int)((byte >> 4) & 0x3) - 2) * qy[2])
-                           +  (((int)((byte >> 6) & 0x3) - 2) * qy[3]);
+            for (int u = 0; u < 32; ++u) {
+                const int w = 32*sub + u; // natural weight index
+                const uint8_t byte = x[i].qs[w >> 2];
+                const int code = (byte >> (2*(w & 3))) & 0x3;
+                const int8_t qy = y[i].qs[(w & 3)*32 + (w >> 2)];
+                sumi_block += (code - 2) * (int) qy;
             }
 
             sumi += d1 * sumi_block;

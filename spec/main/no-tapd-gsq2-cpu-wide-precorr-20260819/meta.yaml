@@ -1,0 +1,76 @@
+skill_version: "0.4.1"
+status: done
+complexity: M
+work_type: perf
+subdomain: main
+cross_subdomains: []
+
+source:
+  type: conversation
+  id: ""
+  url: ""
+  workspace_id: ""
+  fetch_status: n/a
+  upload_status: n/a
+
+tapd_sync:
+  last_synced: null
+  action: null
+  entry_type: null
+  entry_id: ""
+  workspace_id: ""
+  fields: []
+  artifact: null
+  skipped: user
+
+execution_env:
+  coding:
+    agent: codebuddy
+    last_active: "2026-08-19T20:10:00+08:00"
+  container:
+    agent: codebuddy-verify
+    last_run: null
+
+models:
+  review: opus
+
+handoff:
+  pending: false
+  manifest: 2-handoff-manifest.json
+  produced_at: "2026-08-19T20:45:00+08:00"
+  produced_by_commit: "2b5cc1b639a44d978287ea8bcc315934ce1e32ab"
+  consumed_at: "2026-08-19T20:58:00+08:00"
+  consumed_by_commit: "2b5cc1b639a44d978287ea8bcc315934ce1e32ab"
+
+verify_attempts: 0
+max_retries: 3
+
+artifacts:
+  clarification:      {produced_at: "2026-08-19T20:10:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  context-snapshot:    {produced_at: "2026-08-19T20:22:00+08:00", stale: false, revision: 2, produced_by_env: coding, updated_by_stages: [clarify, design]}
+  change-plan:         {produced_at: "2026-08-19T20:22:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  coding-snapshot:      {produced_at: "2026-08-19T20:38:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  verify-report:
+    compile:     {produced_at: "2026-08-19T20:58:00+08:00", stale: false, revision: 1, produced_by_env: container, result: pass}
+    unit:        {produced_at: "2026-08-19T20:58:00+08:00", stale: false, revision: 1, produced_by_env: container, result: pass}
+    integration: {produced_at: "2026-08-19T20:58:00+08:00", stale: false, revision: 1, produced_by_env: container, result: not_run}
+  reviews:
+    - {produced_at: "2026-08-19T21:03:00+08:00", stale: false, revision: 1, filename: "4-reviews/20260819-2103-verify_informed.md", mode: verify_informed, model: codebuddy-glm-5.3, note: "基于 verify-report r1；模型偏离 models.review=opus，已在报告标注"}
+
+knowledge_base_feedback:
+  status: proposed
+  proposal_count: 2
+  applied_at: null
+
+status_history:
+  - {status: draft, at: "2026-08-19T20:10:00+08:00", by: /ai-clarify, env: coding, reason: "oral perf clarify; wide+precorr kernel spec cycle opened"}
+  - {status: designing, at: "2026-08-19T20:22:00+08:00", by: /ai-design, env: coding, reason: "change-plan drafted; §C gap 1 closed (fattn is 3rd vec_dot consumer, guard planned); file set 4→6"}
+  - {status: pending_verification, at: "2026-08-19T20:38:00+08:00", by: /ai-go, env: coding, reason: "6/6 §B items implemented (fattn guard + mmid test added this stage); local self-check 6/6 pass; handoff pending, implementation uncommitted"}
+  - {status: verifying, at: "2026-08-19T20:58:00+08:00", by: /ai-verify, env: container, reason: "commit 2b5cc1b63: targeted-stash isolation compile pass; unit 6/6 pass (incl. new mmid case); obj-level symbol probe confirms wide kernel + wiring + guard; integration not_run (manual)"}
+  - {status: reviewing, at: "2026-08-19T21:03:00+08:00", by: /ai-review --mode=verify_informed, env: coding, reason: "verify r1 consumed; §B 6/6, §D all honored; triple-probe evidence accepted; integration/perf acceptance unconfirmed (forced notice)"}
+  - {status: done, at: "2026-08-19T21:12:00+08:00", by: /ai-reflect, env: coding, reason: "2 knowledge proposals drafted (probe-methodology fix + activation-side contract), user chose to keep proposed; workflow complete"}
+
+skipped_phases: []
+paused_from: null
+blocked_reason: null
+blocked_at: null

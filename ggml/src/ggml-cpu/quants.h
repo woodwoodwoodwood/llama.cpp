@@ -14,6 +14,22 @@ extern "C" {
 // Quantization
 void quantize_row_q1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_gsq2(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
+
+// GSQ2 activation layout for the wide-unpack vec_dot kernels. The wide kernel
+// extracts all 128 2-bit codes of a GSQ2 block with 3 shifts + 4 ANDs, which
+// yields them in stride-4 order, so the activation is permuted once at prep
+// time to match: qs[k*32 + i] pairs the code in packed byte i, slot k
+// (i.e. weight 4*i + k). d/corr are per int32 dpbusd lane: lanes 0-1 pair Q8_0
+// sub-block 0, lanes 2-3 sub-block 1, 4-5 sub-block 2, 6-7 sub-block 3.
+// corr folds the (code - 2) codebook offset into a precomputed per-lane term.
+typedef struct {
+    int8_t qs[QK_GSQ2]; // permuted Q8_0 values (same bytes as the plain Q8_0 path)
+    float  d[8];        // [d0,d0,d1,d1,d2,d2,d3,d3] of the 4 Q8_0 sub-blocks
+    float  corr[8];     // corr[lane] = -2 * sum(qs lane) * d[lane]
+} block_gsq2_act;
+
+size_t ggml_gsq2_act_row_size(int64_t n);
+void ggml_quantize_row_gsq2_act(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k);
 void quantize_row_q4_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_q4_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void quantize_row_q5_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
