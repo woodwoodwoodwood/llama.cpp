@@ -1,0 +1,77 @@
+skill_version: "0.4.1"
+status: done
+complexity: L
+work_type: perf
+subdomain: main
+cross_subdomains: []
+
+source:
+  type: conversation
+  id: ""
+  url: ""
+  workspace_id: ""
+  fetch_status: n/a
+  upload_status: n/a
+
+tapd_sync:
+  last_synced: null
+  action: null
+  entry_type: null
+  entry_id: ""
+  workspace_id: ""
+  fields: []
+  artifact: null
+  skipped: user
+
+execution_env:
+  coding:
+    agent: cursor-grok
+    last_active: "2026-08-24T18:00:00+08:00"
+  container:
+    agent: cursor-grok-verify
+    last_run: "2026-08-24T17:55:00+08:00"
+
+models:
+  review: opus
+
+handoff:
+  pending: false
+  manifest: 2-handoff-manifest.json
+  produced_at: "2026-08-24T17:50:00+08:00"
+  produced_by_commit: "d554ecb12c9503b26121c42a465c9f4ec944ef5e"
+  consumed_at: "2026-08-24T17:55:00+08:00"
+  consumed_by_commit: "d554ecb12c9503b26121c42a465c9f4ec944ef5e"
+
+verify_attempts: 0
+max_retries: 3
+
+artifacts:
+  clarification:      {produced_at: "2026-08-24T18:00:00+08:00", stale: false, revision: 2, produced_by_env: coding}
+  context-snapshot:    {produced_at: "2026-08-24T17:38:00+08:00", stale: false, revision: 2, produced_by_env: coding, updated_by_stages: [clarify, design]}
+  change-plan:         {produced_at: "2026-08-24T17:38:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  coding-snapshot:      {produced_at: "2026-08-24T17:40:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  verify-report:
+    compile:     {produced_at: "2026-08-24T17:55:00+08:00", stale: false, revision: 1, produced_by_env: container, result: pass}
+    unit:        {produced_at: "2026-08-24T17:55:00+08:00", stale: false, revision: 1, produced_by_env: container, result: fail}
+    integration: {produced_at: "2026-08-24T17:55:00+08:00", stale: false, revision: 1, produced_by_env: container, result: not_run}
+  reviews:
+    - {produced_at: "2026-08-24T18:00:00+08:00", stale: false, revision: 1, filename: "4-reviews/20260824-1800-verify_informed.md", mode: verify_informed, model: cursor-grok-4.6, note: "模型偏离 models.review=opus，已在报告标注"}
+
+knowledge_base_feedback:
+  status: proposed
+  proposal_count: 2
+  applied_at: null
+
+status_history:
+  - {status: draft, at: "2026-08-24T17:35:00+08:00", by: /ai-clarify, env: coding, reason: "retrospective after-the-fact spec for already-landed spec-chain work"}
+  - {status: designing, at: "2026-08-24T17:38:00+08:00", by: /ai-design, env: coding, reason: "change-plan projected from working-tree diff"}
+  - {status: pending_verification, at: "2026-08-24T17:40:00+08:00", by: /ai-go, env: coding, reason: "implementation already present; snapshot + handoff written"}
+  - {status: pending_verification, at: "2026-08-24T17:45:00+08:00", by: /ai-go, env: coding, reason: "committed as adf41b6b2; handoff produced_by_commit filled"}
+  - {status: verifying, at: "2026-08-24T17:55:00+08:00", by: /ai-verify, env: container, reason: "compile pass; unit fail is ggml.ai HTTP (test_infra_issue), not spec-chain; user asked to continue flow"}
+  - {status: reviewing, at: "2026-08-24T18:00:00+08:00", by: /ai-review --mode=verify_informed, env: coding, reason: "verify r1 consumed; P0/P1=0; model != opus annotated"}
+  - {status: done, at: "2026-08-24T17:55:00+08:00", by: /ai-reflect, env: coding, reason: "user skipped ai_docs writes; knowledge_base_feedback stays proposed"}
+
+skipped_phases: []
+paused_from: null
+blocked_reason: null
+blocked_at: null

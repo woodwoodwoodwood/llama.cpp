@@ -328,6 +328,7 @@ struct common_params_speculative_draft {
     float p_split = 0.1f; // speculative decoding split probability
     float p_min   = 0.0f; // minimum speculative decoding probability (greedy)
 
+    bool chain = false; // chained drafting: all n_max tokens in one GPU decode (MTP only)
     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
 
     common_params_model mparams;

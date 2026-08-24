@@ -1257,6 +1257,11 @@ private:
             cparams_mtp.type_v        = params_base.speculative.draft.cache_type_v;
             cparams_mtp.n_rs_seq      = 0;
             cparams_mtp.n_outputs_max = params_base.n_parallel;
+            // chained MTP drafting outputs logits for every chain step in one decode
+            if (params_base.speculative.draft.chain || std::getenv("LLAMA_SPEC_CHAIN") != nullptr) {
+                const uint32_t per_seq = std::max(1, params_base.speculative.draft.n_max);
+                cparams_mtp.n_outputs_max = std::max(cparams_mtp.n_outputs_max, params_base.n_parallel * per_seq);
+            }
             cparams_mtp.ctx_other     = ctx_tgt;
 
             ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));

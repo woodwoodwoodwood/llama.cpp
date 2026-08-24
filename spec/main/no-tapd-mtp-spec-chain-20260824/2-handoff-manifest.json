@@ -1,0 +1,11 @@
+{
+  "spec_dir": "spec/main/no-tapd-mtp-spec-chain-20260824/",
+  "produced_by_commit": "d554ecb12c9503b26121c42a465c9f4ec944ef5e",
+  "produced_at": "2026-08-24T17:50:00+08:00",
+  "unit_test_targets": ["test-arg-parser"],
+  "integration_test_requested": true,
+  "retry_count": 0,
+  "max_retries": 3,
+  "prior_failure_summary": null,
+  "note": "After-the-fact spec. Implementation + CLI tests + verify artifacts are one commit (HEAD). produced_by_commit is the pre-SHA-refresh amend; live HEAD may differ only in these metadata fields. Do NOT mix testing/CMakeLists.txt, .cursor/, leftover GSQ2 spec snapshots, or ai_docs/."
+}
