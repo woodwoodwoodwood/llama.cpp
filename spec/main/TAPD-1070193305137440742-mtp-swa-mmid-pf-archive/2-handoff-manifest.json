@@ -1,0 +1,10 @@
+{
+  "spec_dir": "spec/main/TAPD-1070193305137440742-mtp-swa-mmid-pf-archive/",
+  "produced_by_commit": "58ccc2609f87e418f724c2e08b870caeeca811eb",
+  "produced_at": "2026-08-24T10:40:00+08:00",
+  "unit_test_targets": ["test-gsq2-vec-dot", "test-gsq2-vec-dot-mmid-pf0"],
+  "integration_test_requested": true,
+  "retry_count": 0,
+  "max_retries": 3,
+  "prior_failure_summary": null
+}

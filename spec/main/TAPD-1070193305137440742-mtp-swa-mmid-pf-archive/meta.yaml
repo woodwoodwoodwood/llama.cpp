@@ -1,0 +1,73 @@
+skill_version: "0.4.1"
+status: pending_verification
+complexity: M
+work_type: perf
+subdomain: main
+cross_subdomains: []
+
+source:
+  type: tapd
+  id: "1070193305137440742"
+  url: "https://tapd.woa.com/tapd_fe/70193305/story/detail/1070193305137440742"
+  workspace_id: "70193305"
+  fetch_status: degraded
+  upload_status: n/a
+
+tapd_sync:
+  last_synced: null
+  action: null
+  entry_type: null
+  entry_id: ""
+  workspace_id: ""
+  fields: []
+  artifact: null
+  skipped: user
+
+execution_env:
+  coding:
+    agent: codebuddy
+    last_active: "2026-08-24T10:00:00+08:00"
+  container:
+    agent: "<占位，具体容器侧 agent/CI 标识，工具专项定>"
+    last_run: null
+
+models:
+  review: opus
+
+handoff:
+  pending: true
+  manifest: 2-handoff-manifest.json
+  produced_at: "2026-08-24T10:40:00+08:00"
+  produced_by_commit: "58ccc2609f87e418f724c2e08b870caeeca811eb"
+  consumed_at: null
+  consumed_by_commit: null
+
+verify_attempts: 0
+max_retries: 3
+
+artifacts:
+  clarification:      {produced_at: "2026-08-24T10:00:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  context-snapshot:    {produced_at: "2026-08-24T10:30:00+08:00", stale: false, revision: 3, produced_by_env: coding, updated_by_stages: [clarify, design]}
+  change-plan:         {produced_at: "2026-08-24T10:30:00+08:00", stale: false, revision: 2, produced_by_env: coding}
+  coding-snapshot:      {produced_at: "2026-08-24T10:40:00+08:00", stale: false, revision: 1, produced_by_env: coding}
+  verify-report:
+    compile:     {produced_at: null, stale: false, revision: 0, produced_by_env: n/a, result: n/a}
+    unit:        {produced_at: null, stale: false, revision: 0, produced_by_env: n/a, result: n/a}
+    integration: {produced_at: null, stale: false, revision: 0, produced_by_env: n/a, result: not_run}
+  reviews:
+    - {produced_at: "2026-08-24T11:00:00+08:00", stale: false, revision: 1, filename: "4-reviews/20260824-1100-go_only.md", mode: go_only, model: opus}
+
+knowledge_base_feedback:
+  status: not_started
+  proposal_count: 0
+  applied_at: null
+
+status_history:
+  - {status: draft, at: "2026-08-24T10:00:00+08:00", by: /ai-clarify, env: coding, reason: "TAPD 拉取失败（重定向到企业登录页，F1）；用户手动贴出单据内容转为澄清素材；单据实为两个已完成并已提交的 perf 改动的事后补归档需求"}
+  - {status: designing, at: "2026-08-24T10:15:00+08:00", by: /ai-design, env: coding, reason: "初版：护栏+纯函数抽取到 common/speculative.h/.cpp；用户反馈不要为测试而抽取，简化为 server-context.cpp 原地 inline 护栏，MTP_SWA 侧改为人工验证，MMID_PF 侧保留 test-gsq2-vec-dot 双 ENVIRONMENT CTest 注册方案"}
+  - {status: pending_verification, at: "2026-08-24T10:40:00+08:00", by: /ai-go, env: coding, reason: "server-context.cpp 加 n_ubatch<=W 护栏（inline）；tests/CMakeLists.txt 追加 test-gsq2-vec-dot-mmid-pf0 CTest 注册；用户明确指示本阶段不做本地编译/运行，未验证；工作区改动尚未提交（HEAD 仍为 58ccc2609），已在 coding-snapshot 标注 dirty-state 风险；handoff pending"}
+
+skipped_phases: []
+paused_from: null
+blocked_reason: null
+blocked_at: null

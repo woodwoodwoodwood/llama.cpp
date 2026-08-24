@@ -1469,6 +1469,34 @@ UseGgmlGemm2:;
 
 #define MMID_MATRIX_ROW(row_id, i1) matrix_rows[(row_id)*ids->ne[0]*ids->ne[1] + (i1)]
 
+#if defined(__GNUC__) || defined(__clang__)
+    // (rw=0, locality=1) -> prefetch for read into L2/L3 but not L1, which is what we want
+    // for weight rows we touch exactly once.
+    #define ggml_cpu_prefetch_ro(p) __builtin_prefetch((p), 0, 1)
+#else
+    #define ggml_cpu_prefetch_ro(p) ((void) (p))
+#endif
+
+// Software-prefetch the expert weight row a few rows ahead of the one being dotted in
+// the CPU mul_mat_id inner loop. During decode each thread streams ~34 KiB of one
+// expert's rows contiguously, so the hardware streamer already covers most of it, but
+// there is residual DRAM latency at the head of every chunk and on each jump to the
+// next expert. GGML_MMID_PF overrides the distance; 0 disables.
+//
+// Distance swept 4/6/8/12/16 on a 2-bit gsq2 MoE (256 experts, 8 active, --cpu-moe,
+// -t 8, RTX 5060 / Arrow Lake-S): decode peaks at 8 rows and falls off either side.
+#define GGML_MMID_PF_DEFAULT 8
+
+static int ggml_mmid_pf_distance(void) {
+    static int d = -1;
+    if (d < 0) {
+        const char * s = getenv("GGML_MMID_PF");
+        d = s ? atoi(s) : GGML_MMID_PF_DEFAULT;
+        if (d < 0) { d = 0; }
+    }
+    return d;
+}
+
 struct mmid_row_mapping {
     int32_t i1;
     int32_t i2;
@@ -1500,6 +1528,8 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
     const int64_t blck_0 = 16;
     const int64_t blck_1 = 16;
 
+    const int64_t pf_distance = ggml_mmid_pf_distance();
+
     float tmp[16];
 
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
@@ -1528,6 +1558,18 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
                 float * dst_col = (float *) ((char *) dst->data + (i1*nb1 + i2*nb2));
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                    if (pf_distance) {
+                        const int64_t ir0_pf = ir0 + pf_distance;
+                        if (ir0_pf < ir0_end) {
+                            // prefetch the whole weight row `pf_distance` rows ahead while we
+                            // compute the current one -- a single-cacheline hint is too shallow
+                            // to hide DRAM latency for a 544-byte (8.5 line) gsq2 row.
+                            const char * pf_row = src0_cur + ir0_pf*nb01;
+                            for (size_t off = 0; off < (size_t) nb01; off += 64) {
+                                ggml_cpu_prefetch_ro(pf_row + off);
+                            }
+                        }
+                    }
                     vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
                 }
 

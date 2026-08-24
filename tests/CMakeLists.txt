@@ -242,6 +242,10 @@ llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
 # GSQ2 CPU vec_dot vs generic. Uses backend registry (works with GGML_BACKEND_DL=ON).
 llama_build_and_test(test-gsq2-vec-dot.cpp)
+# Re-run with GGML_MMID_PF=0 (prefetch disabled) in a separate process: ggml_mmid_pf_distance()
+# caches getenv() per-process, so the two settings can't both be exercised in one run.
+llama_test(test-gsq2-vec-dot NAME test-gsq2-vec-dot-mmid-pf0)
+set_tests_properties(test-gsq2-vec-dot-mmid-pf0 PROPERTIES ENVIRONMENT "GGML_MMID_PF=0")
 
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")

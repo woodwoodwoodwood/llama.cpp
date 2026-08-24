@@ -1258,6 +1258,32 @@ private:
             cparams_mtp.n_rs_seq      = 0;
             cparams_mtp.n_outputs_max = params_base.n_parallel;
             cparams_mtp.ctx_other     = ctx_tgt;
+            // EXPERIMENTAL (VRAM tuning): sliding-window MTP draft context.
+            // LLAMA_MTP_SWA=W makes the draft KV cache a size-W sliding window (see
+            // llama-model.cpp, which sets swa_type/n_swa). A plain KV cache still
+            // allocates a buffer of n_ctx_seq regardless of the window, so we also cap
+            // the draft context buffer here to 2*W per slot — big enough for the window
+            // plus an in-flight ubatch, so both the draft KV buffer and its FA f16
+            // scratch shrink from the full -c down to the window. One knob (LLAMA_MTP_SWA)
+            // drives both the window and this buffer cap. Requires n_ubatch <= W.
+            if (const char * e = std::getenv("LLAMA_MTP_SWA")) {
+                uint32_t w = (uint32_t) std::atoi(e);
+                if (w > 0) {
+                    uint32_t nub = (uint32_t) params_base.n_ubatch;
+                    if (nub > w) {
+                        SRV_ERR("LLAMA_MTP_SWA=%u requires n_ubatch <= %u, got n_ubatch=%u\n", w, w, nub);
+                        return false;
+                    }
+
+                    uint32_t np  = params_base.n_parallel ? params_base.n_parallel : 1;
+                    uint32_t cap = 2u * w * np;
+                    if (cap < cparams_mtp.n_ctx) {
+                        SRV_INF("MTP: draft ctx n_ctx %u -> %u (2*LLAMA_MTP_SWA*n_parallel)\n",
+                                cparams_mtp.n_ctx, cap);
+                        cparams_mtp.n_ctx = cap;
+                    }
+                }
+            }
 
             ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));
             if (ctx_dft == nullptr) {

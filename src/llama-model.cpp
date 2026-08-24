@@ -2246,6 +2246,22 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
+                        // EXPERIMENTAL (VRAM tuning): give the MTP draft context a
+                        // sliding-window KV cache. Combined with a capped n_ctx_seq
+                        // (LLAMA_MTP_NCTX), this lets the single nextn layer attend a
+                        // bounded recent window so both the KV buffer and the FA f16
+                        // scratch shrink linearly, at a possible acceptance-rate cost.
+                        uint32_t       mtp_n_swa    = hparams.n_swa;
+                        llama_swa_type mtp_swa_type = hparams.swa_type;
+                        if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
+                            if (const char * e = std::getenv("LLAMA_MTP_SWA")) {
+                                mtp_n_swa    = (uint32_t) std::atoi(e);
+                                mtp_swa_type = LLAMA_SWA_TYPE_STANDARD;
+                                LLAMA_LOG_INFO("%s: MTP draft SWA window = %u (LLAMA_MTP_SWA)\n",
+                                        __func__, mtp_n_swa);
+                            }
+                        }
+
                         res = new llama_kv_cache(
                                 *this,
                                 hparams,
@@ -2257,8 +2273,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 cparams.n_ctx_seq,
                                 cparams.n_seq_max,
                                 1,
-                                hparams.n_swa,
-                                hparams.swa_type,
+                                mtp_n_swa,
+                                mtp_swa_type,
                                 nullptr,
                                 filter,
                                 nullptr,
