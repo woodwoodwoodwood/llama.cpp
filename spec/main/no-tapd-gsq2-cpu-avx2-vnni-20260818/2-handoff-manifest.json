@@ -1,0 +1,11 @@
+{
+  "spec_dir": "spec/main/no-tapd-gsq2-cpu-avx2-vnni-20260818/",
+  "produced_by_commit": "d6ab3cd2d762cfa886a9b775a04d665ddee756f3",
+  "produced_at": "2026-08-18T17:10:00+08:00",
+  "note": "commit refreshed 2026-08-19 (spec docs amend; code identical to 9faf2bdd7 lineage)",
+  "unit_test_targets": ["test-gsq2-vec-dot"],
+  "integration_test_requested": true,
+  "retry_count": 0,
+  "max_retries": 3,
+  "prior_failure_summary": null
+}

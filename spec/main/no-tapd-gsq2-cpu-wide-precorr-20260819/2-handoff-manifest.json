@@ -1,0 +1,11 @@
+{
+  "spec_dir": "spec/main/no-tapd-gsq2-cpu-wide-precorr-20260819/",
+  "produced_by_commit": "2b5cc1b639a44d978287ea8bcc315934ce1e32ab",
+  "produced_at": "2026-08-19T20:45:00+08:00",
+  "unit_test_targets": ["test-gsq2-vec-dot"],
+  "integration_test_requested": true,
+  "retry_count": 0,
+  "max_retries": 3,
+  "prior_failure_summary": null,
+  "note": "Implementation is committed as 2b5cc1b63 (this commit; author lijiajieli, co-author cakejiang). The worktree additionally holds UNCOMMITTED changes from a separate task (q3_K KV-cache CUDA port: common/arg.cpp, ggml-cuda/*, testing/CMakeLists.txt, tools/llama-bench/*) in files DISJOINT from this requirement. /ai-verify must stash those before building, per ai_docs/verify-clean-tree-isolation.md; the symbol probe for this cycle: build must CONTAIN gsq2_act symbols (opposite polarity of last cycle)."
+}
